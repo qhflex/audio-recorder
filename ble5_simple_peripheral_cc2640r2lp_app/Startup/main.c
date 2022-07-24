@@ -59,9 +59,7 @@
 #include "hal_assert.h"
 #include "bcomdef.h"
 #include "simple_peripheral.h"
-#ifdef PTM_MODE
-#include "npi_task.h"
-#endif // PTM_MODE
+#include "audio.h"
 
 /* Header files required to enable instruction fetch cache */
 #include <inc/hw_memmap.h>
@@ -143,6 +141,7 @@ int main()
   /* Start tasks of external images - Priority 5 */
   ICall_createRemoteTasks();
 
+  Audio_createTask();
   SimplePeripheral_createTask();
 
   /* enable interrupts and start SYS/BIOS */
