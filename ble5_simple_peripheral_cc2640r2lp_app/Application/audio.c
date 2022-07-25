@@ -51,10 +51,9 @@
  * MACROS
  */
 
-// #define LOG_PCM_PACKET
-// #define LOG_PCM_SUPPORT_QOS
-// #define LOG_ADPCM_PACKET
-// #define LOG_ADPCM_SUPPORT_QOS
+#define LOG_ADPCM_DATA
+// #define LOG_PCM_DATA
+
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
         (type *)( (char *)__mptr - offsetof(type,member) );})
@@ -67,13 +66,7 @@
  */
 #define MAGIC                             (0xD970576A)
 
-#define ADPCM_FORMAT                      ((uint32_t)0)
-#define PCM_FORMAT                        ((uint32_t)1)
-
 #define PREAMBLE                          ((uint64_t)0x7FFF80017FFF8001)
-
-#define PACKET_TYPE_PCM                   0x01
-#define PACKET_TYPE_ADPCM                 0x00
 
 // Task configuration
 #define MC_TASK_PRIORITY                  1
@@ -83,7 +76,7 @@
 #endif
 
 /* The higher the sampling frequency, the less time we have to process the data, but the higher the sound quality. */
-#define SAMPLE_RATE                       8000   /* Supported values: 8kHz, 16kHz, 32kHz and 44.1kHz */
+#define SAMPLE_RATE                       16000   /* Supported values: 8kHz, 16kHz, 32kHz and 44.1kHz */
 
 /* The more storage space we have, the more delay we have, but the more time we have to process the data. */
 #define NUM_RECORD_PKT                    4
@@ -91,8 +84,9 @@
 #define NUM_PLAY_PKT                      2
 
 #define AUDIO_PCM_EVT                     Event_Id_00
-#define UART_TX_RDY_EVT                   Event_Id_01
-#define AUDIO_EVENTS                      (AUDIO_PCM_EVT)
+#define AUDIO_START_REC                   Event_Id_01
+#define AUDIO_STOP_REC                    Event_Id_02
+#define AUDIO_EVENTS                      (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC)
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -115,43 +109,17 @@
 #define BLOCKS_PER_SECT                   (SECT_SIZE / BLOCK_SIZE)
 #define DATA_BLOCK_COUNT                  (DATA_SECT_COUNT * BLOCKS_PER_SECT)
 
-/*
- * calculate everything from startSect and pcmCount
- */
-#define TAILBUF_SIZE_IN_SECT              16                                    // must be power of 2
-#define TAILBUF_SIZE_IN_ADDR              (TAILBUF_SIZE_IN_SECT << 4)
-
-#define TAILBUF_STEP_IN_SECT              (TAILBUF_SIZE_IN_SECT / 4)            // 1/4
-#define TAILBUF_STEP_IN_ADDR              (TAILBUF_STEP_IN_SECT << 4)
-
-#define TAILBUF_START_ADDR                (recStartAddr + TAILBUF_STEP_IN_ADDR)
-
-#define TAILBUF_MAX_VALID_BLOCKS          ((TAILBUF_SIZE_IN_ADDR * 3 / 4) - BLOCKS_PER_SECT)
-
-#define TAILBUF_ADDR(index)               (TAILBUF_START_ADDR + \
-                                           (index / TAILBUF_SIZE_IN_ADDR) * TAILBUF_STEP_IN_ADDR + \
-                                           (index % TAILBUF_SIZE_IN_ADDR))
-
-#ifdef LOG_PCM_PACKET
-#define ADPCM_MAX_VALID_BLOCKS            ((DATA_SECT_COUNT - 1 - TAILBUF_SIZE_IN_SECT - TAILBUF_STEP_IN_SECT) * BLOCKS_PER_SECT)
-#else
-#define ADPCM_MAX_VALID_BLOCKS            ((DATA_SECT_COUNT - 1) * BLOCKS_PER_SECT)
-#endif
-
-#define UARTREQ_INVALID                   ((uint32_t)-1)
-#define UARTREQ_LAST                      ((uint32_t)-2)
-
 /*********************************************************************
  * TYPEDEFS
  */
-#define ADPCM_BUF_SIZE                    80
-#define PCMBUF_SIZE                       (ADPCM_BUF_SIZE * 4)
+#define ADPCMBUF_SIZE                     200
+#define PCMBUF_SIZE                       (ADPCMBUF_SIZE * 4)
 #define PCM_SAMPLES_PER_BUF               (PCMBUF_SIZE / sizeof(int16_t))
-#define PCMBUF_NUM                        4
+#define PCMBUF_NUM                        3
 #define PCMBUF_TOTAL_SIZE                 (PCMBUF_SIZE * PCMBUF_NUM)
 
 #define ADPCM_SIZE_PER_SECT               4000
-#define ADPCM_BUF_COUNT_PER_SECT          (ADPCM_SIZE_PER_SECT / ADPCM_BUF_SIZE)
+#define ADPCM_BUF_COUNT_PER_SECT          (ADPCM_SIZE_PER_SECT / ADPCMBUF_SIZE)
 
 #define SEGMENT_NUM                       20
 
@@ -163,7 +131,7 @@ typedef struct WriteContext
   List_List processingList;
 
   uint8_t pcmBuf[PCMBUF_TOTAL_SIZE];
-  uint8_t adpcmBuf[ADPCM_BUF_SIZE];
+  uint8_t adpcmBuf[ADPCMBUF_SIZE];
 
   uint32_t adpcmCount;
   uint32_t adpcmCountInSect;
@@ -193,6 +161,32 @@ typedef struct __attribute__ ((__packed__)) footnote
 } footnote_t;
 
 _Static_assert(sizeof(footnote_t)==90, "wrong footnote size");
+
+#ifdef LOG_ADPCM_DATA
+
+typedef struct __attribute__ ((__packed__)) UartPacket
+{
+  uint64_t preamble;    // 0
+  uint32_t startSect;   // 8
+  uint32_t index;       // 12
+  int16_t prevSample;   // 16
+  uint8_t prevIndex;    // 18
+  uint8_t dummy;        // 19
+  uint8_t adpcm[ADPCMBUF_SIZE];
+#ifdef LOG_PCM_DATA
+  uint8_t pcm[PCMBUF_SIZE];
+#endif
+  uint8_t cka;
+  uint8_t ckb;
+} UartPacket_t;
+
+#ifdef LOG_PCM_DATA
+_Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22, "wrong uart packet size"); //1022
+#else
+_Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22, "wrong uart packet size");  // 222
+#endif
+
+#endif
 
 /*********************************************************************
  * GLOBAL VARIABLES
@@ -240,18 +234,8 @@ static const uint8_t markedBytes[8] = { 0x7f, 0x3f, 0x1f, 0x0f, 0x07, 0x03,
 static Event_Handle audioEvent = NULL;
 static Semaphore_Handle semDataReadyForTreatment = NULL;
 
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
-
-/* both level and edge triggered */
+#if defined (LOG_ADPCM_DATA)
 static Semaphore_Handle semUartTxReady = NULL;
-static bool uartTxReady = true;
-
-/* requests with lock */
-GateSwi_Handle pcmRequestGate = NULL;
-uint32_t uartPcmRequest;
-
-GateSwi_Handle adpcmRequestGate = NULL;
-uint32_t uartAdpcmRequest;
 #endif
 
 /*
@@ -279,11 +263,8 @@ uint32_t segments[SEGMENT_NUM + 1] = { [0 ... SEGMENT_NUM]=(uint32_t) -1 };
 WriteContext_t writeContext = { };
 WriteContext_t *wctx = NULL;
 
-/* Transactions will successively be part of the i2sReadList, the treatmentList and the i2sWriteList */
-
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
-uint8_t uartTxBuf[PKT_UART_SIZE * NUM_UART_PKT];
-uint8_t uartRxBuf[32];
+#if defined (LOG_ADPCM_DATA)
+UartPacket_t uartPkt;
 #endif
 
 /*********************************************************************
@@ -298,7 +279,7 @@ static void errCallbackFxn(I2S_Handle handle, int_fast16_t status,
 static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
                             I2S_Transaction *transactionPtr);
 
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
+#if defined (LOG_ADPCM_DATA)
 static void uartReadCallbackFxn(UART_Handle handle, void *buf, size_t count);
 static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count);
 #endif
@@ -357,25 +338,12 @@ static void Audio_init(void)
   semParams.eventId = AUDIO_PCM_EVT;
   semDataReadyForTreatment = Semaphore_create(0, &semParams, Error_IGNORE);
 
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
+#if defined (LOG_ADPCM_DATA)
   Semaphore_Params_init(&semParams);
-  semParams.event = audioEvent;
-  semParams.eventId = UART_TX_RDY_EVT;
+//  semParams.event = audioEvent;
+//  semParams.eventId = UART_TX_RDY_EVT;
   semParams.mode = Semaphore_Mode_BINARY;
   semUartTxReady = Semaphore_create(1, &semParams, Error_IGNORE);
-
-  GateSwi_Params gateParams;
-
-#if defined (LOG_PCM_PACKET)
-  GateSwi_Params_init(&gateParams);
-  pcmRequestGate = GateSwi_create(&gateParams, Error_IGNORE);
-#endif
-
-#if defined (LOG_ADPCM_PACKET)
-  GateSwi_Params_init(&gateParams);
-  adpcmRequestGate = GateSwi_create(&gateParams, Error_IGNORE);
-#endif
-
   UART_init();
 #endif
 
@@ -396,32 +364,39 @@ static void Audio_init(void)
  */
 static void Audio_taskFxn(UArg a0, UArg a1)
 {
-
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
-  int sent = 0;
-#endif
-
-  // Initialize application
   Audio_init();
   loadCounter();
   loadSegments();
+  Event_post(audioEvent, AUDIO_START_REC);
 
-  // TODO change this to an event
-  startRecording();
-
-  // Application main loop
   for (int loop = 0;; loop++)
   {
     uint32_t event = Event_pend(audioEvent, NULL, AUDIO_EVENTS,
                                 BIOS_WAIT_FOREVER);
+    if (event & AUDIO_START_REC)
+    {
+      startRecording();
+    }
+
+    if (event & AUDIO_STOP_REC)
+    {
+      stopRecording();
+    }
+
     if (event & AUDIO_PCM_EVT)
     {
       Semaphore_pend(semDataReadyForTreatment, BIOS_NO_WAIT);
       I2S_Transaction *ttt = (I2S_Transaction*) List_get(&wctx->processingList);
       if (ttt != NULL)
       {
-        int16_t *samples = (int16_t*) ttt->bufPtr;
 
+#ifdef LOG_ADPCM_DATA
+        /* save a copy */
+        int16_t uartPrevSample = wctx->prevSample;
+        uint8_t uartPrevIndex = wctx->prevIndex;
+#endif
+
+        int16_t *samples = (int16_t*) ttt->bufPtr;
         for (int i = 0; i < PCM_SAMPLES_PER_BUF; i++)
         {
           uint8_t code = adpcmEncoder(samples[i], &wctx->prevSample,
@@ -436,20 +411,40 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           }
         }
 
+#ifdef LOG_ADPCM_DATA
+        Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);
+        uartPkt.preamble = PREAMBLE;
+        uartPkt.startSect = wctx->startSect;
+        uartPkt.index = wctx->adpcmCount;
+        uartPkt.prevSample = uartPrevSample;
+        uartPkt.prevIndex = uartPrevIndex;
+#ifdef LOG_PCM_DATA
+        uartPkt.dummy = 1;
+        memcpy(uartPkt.pcm, ttt->bufPtr, PCMBUF_SIZE);
+#else
+        uartPkt.dummy = 0;
+#endif
+        memcpy(uartPkt.adpcm, wctx->adpcmBuf, ADPCMBUF_SIZE);
+        checksum(&uartPkt.startSect, offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect), &uartPkt.cka, &uartPkt.ckb);
+        UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
+#endif
+
+        List_put(&wctx->recordingList, (List_Elem*) ttt);
+
         size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
-            + wctx->adpcmCountInSect * ADPCM_BUF_SIZE;
+            + wctx->adpcmCountInSect * ADPCMBUF_SIZE;
         if (wctx->adpcmCountInSect == 0)
         {
           NVS_erase(nvsHandle, offset, SECT_SIZE);
         }
 
-        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCM_BUF_SIZE,
-                  NVS_WRITE_POST_VERIFY);
+        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCMBUF_SIZE, 0);
+                  // NVS_WRITE_POST_VERIFY);
 
         // last adpcm buf in sect
         if (wctx->adpcmCountInSect + 1 == ADPCM_BUF_COUNT_PER_SECT)
         {
-          footnote_t fn = {};
+          footnote_t fn = { };
           fn.prevSample = wctx->prevSampleInSect;
           fn.prevIndex = wctx->prevIndexInSect;
           fn.dummy = 0;
@@ -458,48 +453,28 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           memcpy(fn.segments, segments, sizeof(segments));
           checksum(&fn, sizeof(fn) - 2, &fn.cka, &fn.ckb);
 
-          offset += ADPCM_BUF_SIZE;
-          NVS_write(nvsHandle, offset, &fn, sizeof(fn), NVS_WRITE_POST_VERIFY);
+          offset += ADPCMBUF_SIZE;
+          // NVS_write(nvsHandle, offset, &fn, sizeof(fn), NVS_WRITE_POST_VERIFY);
+          NVS_write(nvsHandle, offset, &fn, sizeof(fn), 0);
 
           incrementCounter();
 
-          wctx->currSect = MONOTONIC_COUNTER;
+          wctx->currSect++;
           wctx->prevIndexInSect = wctx->prevIndex;
           wctx->prevSampleInSect = wctx->prevSample;
         }
 
         wctx->adpcmCount++;
-        wctx->adpcmCountInSect = wctx->adpcmCount / ADPCM_BUF_COUNT_PER_SECT;
-
-        List_put(&wctx->recordingList, (List_Elem*) ttt);
+        wctx->adpcmCountInSect = wctx->adpcmCount % ADPCM_BUF_COUNT_PER_SECT;
       } /* end of if ttt != NULL */
     } /* end of AUDIO PCM EVENT */
 
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
-    if (uartTxReady)
-    {
-#if defined (LOG_PCM_PACKET) && defined(LOG_PCM_SUPPORT_QOS)
-      if (pktcnt < NUM_UART_PKT && pcm)
+    if (loop > 2000) {
+      while (1)
       {
-        memcpy(&uartTxBuf[PKT_UART_SIZE * pktcnt], pcm, PKT_UART_SIZE);
-        pktcnt++;
+        Task_sleep(1000 / Clock_tickPeriod);
       }
-#endif
-
-      if (uartPktCnt > 0)
-      {
-        UART_write(uartHandle, uartTxBuf, uartPktCnt * PKT_UART_SIZE);
-        uartTxReady = false;
-        sent++;
-      }
-
-      while (sent == 5000)
-      {
-        Task_sleep(1000 * 1000 / Clock_tickPeriod);
-      }
-    } /* end of uartTxReady */
-#endif /* defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET) */
-
+    }
   } /* end of loop */
 }
 
@@ -529,11 +504,10 @@ static void startRecording(void)
     List_put(&wctx->recordingList, (List_Elem*) &wctx->i2sTransaction[k]);
   }
 
-#ifdef LOG_PCM_PACKET
-  wctx->pcmIndex = 0;
-#endif
+#if defined(LOG_ADPCM_DATA)
 
-#if defined(LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
+  if (uartHandle == NULL)
+  {
     UART_Params uartParams;
     UART_Params_init(&uartParams);
     uartParams.baudRate = 1500000; // 115200 * 8;
@@ -546,6 +520,7 @@ static void startRecording(void)
     uartParams.writeDataMode = UART_DATA_BINARY;
     uartParams.writeCallback = uartWriteCallbackFxn;
     uartHandle = UART_open(Board_UART0, &uartParams);
+  }
 #endif
 
   /*
@@ -599,9 +574,13 @@ static void startRecording(void)
 
 static void stopRecording(void)
 {
-  I2S_stopRead(i2sHandle);
-  I2S_stopClocks(i2sHandle);
-  I2S_close(i2sHandle);
+  if (i2sHandle)
+  {
+    I2S_stopRead(i2sHandle);
+    I2S_stopClocks(i2sHandle);
+    I2S_close(i2sHandle);
+  }
+  wctx->finished = true;
 }
 
 static void errCallbackFxn(I2S_Handle handle, int_fast16_t status,
@@ -637,7 +616,7 @@ static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
   }
 }
 
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
+#if defined (LOG_ADPCM_DATA)
 static void uartReadCallbackFxn(UART_Handle handle, void *buf, size_t count)
 {
   if (strcmp(buf, "start") == 0)
@@ -655,7 +634,7 @@ static void uartReadCallbackFxn(UART_Handle handle, void *buf, size_t count)
 
 static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count)
 {
-  uartTxReady = true;
+  // uartTxReady = true;
   Semaphore_post(semUartTxReady);
 }
 #endif
@@ -895,15 +874,18 @@ static void incrementCounter(void)
 
 static void loadSegments(void)
 {
-  if (MONOTONIC_COUNTER == 0) return;
+  uint32_t count = MONOTONIC_COUNTER;
+  if (count == 0)
+    return;
 
-  footnote_t fn = {};
-  size_t offset = (MONOTONIC_COUNTER - 1) % DATA_SECT_COUNT * SECT_SIZE + ADPCM_SIZE_PER_SECT;
+  footnote_t fn = { };
+  size_t offset = (count - 1) % DATA_SECT_COUNT * SECT_SIZE
+      + ADPCM_SIZE_PER_SECT;
   NVS_read(nvsHandle, offset, &fn, sizeof(fn));
 
   uint8_t cka, ckb;
   checksum(&fn, sizeof(fn) - 2, &cka, &ckb);
-  if (fn.cka == cka && fn.ckb == ckb && fn.segments[0] == MONOTONIC_COUNTER)
+  if (fn.cka == cka && fn.ckb == ckb && fn.segments[0] == count)
   {
     memcpy(segments, &fn.segments, sizeof(segments));
   }
@@ -928,63 +910,3 @@ static void updateSegments(void)
     segments[0] = wctx->currSect + 1;
   }
 }
-
-#if 0
-      if (pktcnt < NUM_UART_PKT)
-      {
-        uint32_t key = GateSwi_enter(pcmRequestGate);
-        uint32_t index = uartPcmRequest;
-        uartPcmRequest = UARTREQ_INVALID;
-        GateSwi_leave(pcmRequestGate, key);
-
-        // now we calculate whether the request can be fulfilled solely according to pcmCount
-        // if it can be fulfilled, and it 'happens' to be latest packet pointed by pcm. skip.
-        // the max index we can serve is pcmCount - 1 (last one)
-        // the min index we can serve is pcmCount - (TAILBUF_SIZE_IN_ADDR  * 3/4 - BLOCKS_PER_SECT)
-        // if req index is UARTREQ_LAST, it is automatically pcmCount - 1
-        uint32_t max = recPcmIndex == 0 ? 0 : recPcmIndex - 1;
-        uint32_t min = (recPcmIndex < TAILBUF_MAX_VALID_BLOCKS) ? 0 : recPcmIndex - TAILBUF_MAX_VALID_BLOCKS;
-        if (index == UARTREQ_LAST)
-        {
-          index = max;
-        }
-
-        if (min <= index && index <= max && !(pcm && index == max))
-        {
-          uint32_t pos = pktcnt * PKT_UART_SIZE;
-          memcpy(&uartTxBuf[pos], Preamble, sizeof(Preamble));
-          pos += sizeof(Preamble);
-
-          uint32_t addr = TAILBUF_ADDR(index);
-          uint32_t offset = addr % DATA_BLOCK_COUNT * BLOCK_SIZE;
-          NVS_read(nvsHandle, offset, &uartTxBuf[pos], PKT_UART_SIZE - sizeof(Preamble));
-          pktcnt++;
-        }
-      }
-#endif
-
-#if 0
-      if (pktcnt < NUM_UART_PKT)
-      {
-        uint32_t key = GateSwi_enter(adpcmRequestGate);
-        uint32_t index = uartAdpcmRequest;
-        uartAdpcmRequest = UARTREQ_INVALID;
-        GateSwi_leave(adpcmRequestGate, key);
-
-        uint32_t adpcmCount = recPcmIndex / 4;
-        uint32_t max = adpcmCount == 0 ? 0 : adpcmCount - 1;
-        uint32_t min = adpcmCount < ADPCM_MAX_VALID_BLOCKS ? 0 : adpcmCount - ADPCM_MAX_VALID_BLOCKS;
-
-        if (min <= index && index <= max && !(adpcm && index == max))
-        {
-          uint32_t pos = pktcnt * PKT_UART_SIZE;
-          memcpy(&uartTxBuf[pos], Preamble, sizeof(Preamble));
-          pos += sizeof(Preamble);
-
-          uint32_t addr = recStartAddr + index;
-          uint32_t offset = addr & DATA_BLOCK_COUNT * BLOCK_SIZE;
-          NVS_read(nvsHandle, offset, &uartTxBuf[pos], PKT_UART_SIZE - sizeof(Preamble));
-          pktcnt++;
-        }
-      }
-#endif
