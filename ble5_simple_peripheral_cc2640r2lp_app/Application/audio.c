@@ -51,8 +51,9 @@
  * MACROS
  */
 
-#define LOG_ADPCM_DATA
+// #define LOG_ADPCM_DATA
 // #define LOG_PCM_DATA
+// #define NO_FLASH_WRITE
 
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
@@ -78,11 +79,6 @@
 /* The higher the sampling frequency, the less time we have to process the data, but the higher the sound quality. */
 #define SAMPLE_RATE                       16000   /* Supported values: 8kHz, 16kHz, 32kHz and 44.1kHz */
 
-/* The more storage space we have, the more delay we have, but the more time we have to process the data. */
-#define NUM_RECORD_PKT                    4
-#define NUM_UART_PKT                      1
-#define NUM_PLAY_PKT                      2
-
 #define AUDIO_PCM_EVT                     Event_Id_00
 #define AUDIO_START_REC                   Event_Id_01
 #define AUDIO_STOP_REC                    Event_Id_02
@@ -105,14 +101,14 @@
  */
 #define MONOTONIC_COUNTER                 ((((uint32_t)(markedBitsHi >> 1) - 1) << 15) + (uint32_t)(markedBitsLo - 1))
 
-#define BLOCK_SIZE                        256
-#define BLOCKS_PER_SECT                   (SECT_SIZE / BLOCK_SIZE)
-#define DATA_BLOCK_COUNT                  (DATA_SECT_COUNT * BLOCKS_PER_SECT)
+//#define BLOCK_SIZE                        256
+//#define BLOCKS_PER_SECT                   (SECT_SIZE / BLOCK_SIZE)
+//#define DATA_BLOCK_COUNT                  (DATA_SECT_COUNT * BLOCKS_PER_SECT)
 
 /*********************************************************************
  * TYPEDEFS
  */
-#define ADPCMBUF_SIZE                     200
+#define ADPCMBUF_SIZE                     160
 #define PCMBUF_SIZE                       (ADPCMBUF_SIZE * 4)
 #define PCM_SAMPLES_PER_BUF               (PCMBUF_SIZE / sizeof(int16_t))
 #define PCMBUF_NUM                        3
@@ -431,25 +427,31 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
         List_put(&wctx->recordingList, (List_Elem*) ttt);
 
+#ifndef NO_FLASH_WRITE
         size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
             + wctx->adpcmCountInSect * ADPCMBUF_SIZE;
+
+
         if (wctx->adpcmCountInSect == 0)
         {
+
           NVS_erase(nvsHandle, offset, SECT_SIZE);
+
         }
 
-        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCMBUF_SIZE, 0);
-                  // NVS_WRITE_POST_VERIFY);
+        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCMBUF_SIZE, 0); // NVS_WRITE_POST_VERIFY);
+#endif
 
         // last adpcm buf in sect
         if (wctx->adpcmCountInSect + 1 == ADPCM_BUF_COUNT_PER_SECT)
         {
+          updateSegments();
+#ifndef NO_FLASH_WRITE
           footnote_t fn = { };
           fn.prevSample = wctx->prevSampleInSect;
           fn.prevIndex = wctx->prevIndexInSect;
           fn.dummy = 0;
 
-          updateSegments();
           memcpy(fn.segments, segments, sizeof(segments));
           checksum(&fn, sizeof(fn) - 2, &fn.cka, &fn.ckb);
 
@@ -458,7 +460,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           NVS_write(nvsHandle, offset, &fn, sizeof(fn), 0);
 
           incrementCounter();
-
+#endif
           wctx->currSect++;
           wctx->prevIndexInSect = wctx->prevIndex;
           wctx->prevSampleInSect = wctx->prevSample;
