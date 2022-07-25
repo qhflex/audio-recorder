@@ -7,8 +7,9 @@
 /*********************************************************************
  * INCLUDES
  */
-#include <audio.h>
+
 #include <string.h>
+#include <assert.h>
 
 #include <xdc/runtime/Error.h>
 #include <xdc/runtime/Log.h>
@@ -34,6 +35,8 @@
 
 #include <board.h>
 
+#include "audio.h"
+
 /*********************************************************************
  *
  * Notification
@@ -52,7 +55,6 @@
 // #define LOG_PCM_SUPPORT_QOS
 // #define LOG_ADPCM_PACKET
 // #define LOG_ADPCM_SUPPORT_QOS
-
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
         (type *)( (char *)__mptr - offsetof(type,member) );})
@@ -90,11 +92,7 @@
 
 #define AUDIO_PCM_EVT                     Event_Id_00
 #define UART_TX_RDY_EVT                   Event_Id_01
-#define AUDIO_UART_REQ_EVT                Event_Id_02
-#define MORE_SPACE_EVT                    Event_Id_03
-#define LESS_SPACE_EVT                    Event_Id_04 // this is a pun. it's acturally a stop event
-
-#define AUDIO_ALL_EVENTS                  (AUDIO_PCM_EVT | UART_TX_RDY_EVT | AUDIO_UART_REQ_EVT | MORE_SPACE_EVT | LESS_SPACE_EVT)
+#define AUDIO_EVENTS                      (AUDIO_PCM_EVT)
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -146,133 +144,55 @@
 /*********************************************************************
  * TYPEDEFS
  */
+#define ADPCM_BUF_SIZE                    80
+#define PCMBUF_SIZE                       (ADPCM_BUF_SIZE * 4)
+#define PCM_SAMPLES_PER_BUF               (PCMBUF_SIZE / sizeof(int16_t))
+#define PCMBUF_NUM                        4
+#define PCMBUF_TOTAL_SIZE                 (PCMBUF_SIZE * PCMBUF_NUM)
 
-typedef struct __attribute__ ((__packed__)) DataPacket
+#define ADPCM_SIZE_PER_SECT               4000
+#define ADPCM_BUF_COUNT_PER_SECT          (ADPCM_SIZE_PER_SECT / ADPCM_BUF_SIZE)
+
+#define SEGMENT_NUM                       20
+
+typedef struct WriteContext
 {
-  union {
-    List_Elem elem;
-    uint64_t preamble;
-  };
+  I2S_Transaction i2sTransaction[PCMBUF_NUM];
 
-  /* address is mainly required for debugging, but it is also essential for knowing
-   * that the recorded audio data has rollover-ed several times in a single session.
-   * that is, continuous recording for several hours or even days.
-   */
-  uint32_t address;
+  List_List recordingList;
+  List_List processingList;
 
-  /*
-   * session is simply the first 'address' in a session. For data storage are sector
-   * aligned, we can expect the low 4 bits are always zeros. We use these bits to
-   * mark the data type. 0 for adpcm non-volatile storage, and 1 for (temp) pcm
-   * tailing buffer.
-   */
-  uint32_t session;
+  uint8_t pcmBuf[PCMBUF_TOTAL_SIZE];
+  uint8_t adpcmBuf[ADPCM_BUF_SIZE];
 
-  union __attribute__ ((__packed__)) {
-    struct __attribute__ ((__packed__)) {
-      /*
-       * since 400 packets generated per 6 (@8000), 3 (@16000), or 2 (@24000) second,
-       * we can expect a 24-hour continuous recording will overflow an index value without
-       * enough space.
-       */
-      uint32_t index;
-    } pcm;
-    struct __attribute__ ((__packed__)) {
-      /*
-       * same order with ble interface format
-       */
-      uint8_t dummy;
-      uint8_t previndex;
-      int16_t prevsample;
-    } adpcm;
-  };
+  uint32_t adpcmCount;
+  uint32_t adpcmCountInSect;
 
-  /* maybe change to signed short and 4 bit struct union in future, but this influence
-   * existing code.
-   */
-  uint8_t data[240];
+  uint32_t startSect;
+  uint32_t currSect;
 
-  union {
-    struct __attribute__ ((__packed__)) {
-      /* written into flash ended here, crc not written, total 252 bytes
-       * do we need a timestamp?
-       */
-      uint8_t cka;
-      uint8_t ckb;
-      uint16_t ckPadding;
-    };
-    uint32_t sampleCnt;
-  };
-} DataPacket_t;
+  /* these are working adpcm state */
+  int16_t prevSample;
+  uint8_t prevIndex;
 
-/* total 268 bytes*/
-_Static_assert(sizeof(DataPacket_t) == 8 + 256,
-               "wrong data packet size");
+  /* these records initial adpcm state for a sector */
+  int16_t prevSampleInSect;
+  uint8_t prevIndexInSect;
 
-/* nvs write 254 bytes TODO check write */
-#define PKT_NVS_RECORD_START(pkt)       (&pkt->address)
-#define PKT_NVS_RECORD_SIZE             (252 + 2)
-_Static_assert(interval_of(DataPacket_t, address, ckPadding) == PKT_NVS_RECORD_SIZE,
-               "wrong data record size");
+  bool finished;
+} WriteContext_t;
 
-/* adpcm data, state + nibbles */
-#define PKT_ADPCM_START(pkt)            (&(pkt)->adpcm)
-#define PKT_ADPCM_SIZE                  (244)
-_Static_assert(interval_of(DataPacket_t, adpcm, cka) == PKT_ADPCM_SIZE,
-               "wrong adpcm data size");
-
-/* uart send 262 bytes, including preamble  (8), data (252) and crc (2) */
-#define PKT_UART_START(pkt)             (&pkt->preamble)
-#define PKT_UART_SIZE                   (8 + 252 + 2)
-_Static_assert(interval_of(DataPacket_t, preamble, ckPadding) == PKT_UART_SIZE,
-               "wrong uart packet size");
-
-typedef struct PcmPair
+typedef struct __attribute__ ((__packed__)) footnote
 {
-  int16_t s0;
-  int16_t s1;
-} PcmPair_t;
-
-typedef struct __attribute__ ((__packed__)) PcmPacket
-{
-  uint64_t preamble;
-  uint32_t address;
-  uint32_t session;
-  uint32_t index;
-  uint8_t data[240];
+  uint16_t prevSample;
+  uint8_t prevIndex;
+  uint8_t dummy;
+  uint32_t segments[SEGMENT_NUM + 1];
   uint8_t cka;
   uint8_t ckb;
-  uint16_t padding;
-} PcmPacket_t;
+} footnote_t;
 
-typedef struct __attribute__ ((__packed__)) adpcmState
-{
-  int16_t prevsample;
-  uint8_t previndex;
-  unsigned int reserved : 7;
-  unsigned int end : 1;
-} adpcmState_t;
-
-typedef struct recordingContext
-{
-  adpcmState_t adpcmState;
-  uint32_t currSect;
-  uint32_t segmentList[20];
-
-  uint32_t pcmPktCnt;
-  uint32_t adpcmSize;
-} recordingContext_t;
-
-typedef struct footer
-{
-  uint32_t currSect;
-  adpcmState_t adpcmState;
-  uint32_t rsvd1;
-  uint32_t rsvd2;
-  uint32_t sectList[20];
-} footer_t;
-
-_Static_assert(sizeof(footer_t)==96, "wrong footer size");
+_Static_assert(sizeof(footnote_t)==90, "wrong footnote size");
 
 /*********************************************************************
  * GLOBAL VARIABLES
@@ -292,10 +212,6 @@ void (*audioMoreDataAvailable)(void) = NULL;
 /*********************************************************************
  * LOCAL VARIABLES
  */
-const signed short Preamble[4] = { -32767, 32767, -32767, 32767 };  // TODO
-
-_Static_assert(sizeof(Preamble)==8, "wrong preamble size");
-
 /* Table of index changes */
 const static signed char IndexTable[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1,
                                             -1, -1, 2, 4, 6, 8, };
@@ -346,33 +262,6 @@ I2S_Handle i2sHandle;
 NVS_Handle nvsHandle;
 NVS_Attrs nvsAttrs;
 
-/* Transactions will successively be part of the i2sReadList, the treatmentList and the i2sWriteList */
-I2S_Transaction i2sTransaction[NUM_RECORD_PKT];
-DataPacket_t recordingPkt[NUM_RECORD_PKT];
-AdpcmPacket_t playingPkt[NUM_PLAY_PKT];
-
-/* a dedicated adpcm packet buffer */
-DataPacket_t adpcmBuf;
-
-#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
-uint8_t uartTxBuf[PKT_UART_SIZE * NUM_UART_PKT];
-uint8_t uartRxBuf[32];
-#endif
-
-/*
- * Lists containing transactions. Each transaction is in turn in these three lists.
- * Noticing that
- *
- */
-List_List recordingList;
-int recordingListSize;
-List_List processingList;
-int processingListSize;
-
-List_List playingList;
-List_List freeList;
-
-bool playingState = false;
 /*
  * markedBitsLo and markedBitsHi are 'root' counters recording how many sectors have been used in
  * ringbuffer.
@@ -383,26 +272,18 @@ int markedBitsLo = -1;
 int markedBitsHi = -1;
 
 /*
- * This is (block) address for writing data to flash. It is set right after monotonic counter
- * initialized, and thereafter incremented by nv_write() only.
+ * segments
  */
-uint32_t currWritingAddr;
-uint32_t currReadingAddr;   // this is (block) address for playing
+uint32_t segments[SEGMENT_NUM + 1] = { [0 ... SEGMENT_NUM]=(uint32_t) -1 };
 
-/*
- * start address for current recording session. set to currWritingAddr in startRecording()
- * it should be 4k aligned if stopRecording() is properly implemented. TODO
- */
-uint32_t recStartAddr;
+WriteContext_t writeContext = { };
+WriteContext_t *wctx = NULL;
 
-/*
- * adpcm state, reset to zeros in startRecording()
- */
-uint8_t previndex;
-int16_t prevsample;
+/* Transactions will successively be part of the i2sReadList, the treatmentList and the i2sWriteList */
 
-#if defined (LOG_PCM_PACKET)
-uint32_t recPcmIndex;
+#if defined (LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
+uint8_t uartTxBuf[PKT_UART_SIZE * NUM_UART_PKT];
+uint8_t uartRxBuf[32];
 #endif
 
 /*********************************************************************
@@ -432,13 +313,12 @@ static void incrementMarkedBits(int sectIndex, size_t current);
 static void resetLowCounter(void);
 static void resetCounter(void);
 static uint32_t readMagic(void);
-static void readCounter(void);
+static void loadCounter(void);
 static void incrementCounter(void);
-
+static void loadSegments(void);
+static void updateSegments(void);
 static void startRecording(void);
 static void stopRecording(void);
-
-static void writePacket(DataPacket_t *pkt);
 
 /*********************************************************************
  * @fn      I2sMic_createTask
@@ -457,43 +337,6 @@ void Audio_createTask(void)
 
   Task_construct(&mcTask, Audio_taskFxn, &taskParams, NULL);
 }
-
-//void Audio_moreSpace(void)
-//{
-//  Event_post(audioEvent, MORE_SPACE_EVT);
-//}
-//
-//void Audio_play(long position)
-//{
-//  Event_post(audioEvent, MORE_SPACE_EVT);
-//}
-//
-//void Audio_stopPlay()
-//{
-//  Event_post(audioEvent, LESS_SPACE_EVT);
-//}
-//
-//bool Audio_moreData(AdpcmPacket_t **pData)
-//{
-//  AdpcmPacket_t *adpkt = (AdpcmPacket_t*) List_head(&playingList);
-//  if (!adpkt)
-//    return false;
-//
-//  if (*pData != adpkt)
-//    goto end;
-//
-//  // remove head
-//  List_put(&freeList, List_get(&playingList));
-//  Event_post(audioEvent, MORE_SPACE_EVT);
-//
-//  adpkt = (AdpcmPacket_t*) List_head(&playingList);
-//  if (!adpkt)
-//    return false;
-//
-//end:
-//  *pData = adpkt;
-//  return true;
-//}
 
 /*********************************************************************
  * @fn      Audio_init
@@ -560,135 +403,75 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
   // Initialize application
   Audio_init();
-  readCounter();
+  loadCounter();
+  loadSegments();
 
-  currWritingAddr = (MONOTONIC_COUNTER << 4);
-
+  // TODO change this to an event
   startRecording();
 
   // Application main loop
   for (int loop = 0;; loop++)
   {
-    I2S_Transaction *ttt = NULL;
-    DataPacket_t *pcm = NULL;
-
-#if defined(LOG_PCM_PACKET) || defined(LOG_ADPCM_PACKET)
-    int uartPktCnt = 0;
-#endif
-
-    uint32_t event = Event_pend(audioEvent, NULL, AUDIO_ALL_EVENTS,
-    BIOS_WAIT_FOREVER);
-
-    if (event & MORE_SPACE_EVT)
-    {
-      if (playingState == false)  // start play
-      {
-        // clear list
-        List_clearList(&freeList);
-        List_clearList(&playingList);
-
-        // add all packets to free list
-        for (int i = 0; i < NUM_PLAY_PKT; i++)
-        {
-          List_put(&freeList, (List_Elem*)&playingPkt[i]);
-        }
-
-        // set reading addr
-        currReadingAddr = currWritingAddr;
-        playingState = true;
-      }
-    }
-
-    if (event & LESS_SPACE_EVT)
-    {
-      if (playingState == true)
-      {
-        // clear list
-        List_clearList(&freeList);
-        List_clearList(&playingList);
-
-        playingState = false;
-      }
-    }
-
+    uint32_t event = Event_pend(audioEvent, NULL, AUDIO_EVENTS,
+                                BIOS_WAIT_FOREVER);
     if (event & AUDIO_PCM_EVT)
     {
       Semaphore_pend(semDataReadyForTreatment, BIOS_NO_WAIT);
-      ttt = (I2S_Transaction*) List_get(&processingList);
-      processingListSize--;
+      I2S_Transaction *ttt = (I2S_Transaction*) List_get(&wctx->processingList);
       if (ttt != NULL)
       {
-        pcm = container_of(ttt->bufPtr, DataPacket_t, data);
+        int16_t *samples = (int16_t*) ttt->bufPtr;
 
-#ifdef LOG_PCM_PACKET
-        pcm->address = TAILBUF_ADDR(recPcmIndex);
-        pcm->session = recStartAddr | PCM_FORMAT;
-        pcm->pcm.index = recPcmIndex;
-#ifdef LOG_PCM_SUPPORT_QOS
-        writePacket(pcm);
-#endif
-        recPcmIndex++;
-#endif
-
-        int16_t *samples = (int16_t*) pcm->data;
-        for (int i = 0; i < 120; i++)
+        for (int i = 0; i < PCM_SAMPLES_PER_BUF; i++)
         {
-          // start a new adpcm packet
-          if (adpcmBuf.sampleCnt == 0)
+          uint8_t code = adpcmEncoder(samples[i], &wctx->prevSample,
+                                      &wctx->prevIndex);
+          if (i % 2 == 0)
           {
-            adpcmBuf.address = currWritingAddr;
-            adpcmBuf.session = recStartAddr | ADPCM_FORMAT;
-            adpcmBuf.adpcm.dummy = 0;
-            adpcmBuf.adpcm.previndex = previndex;
-            adpcmBuf.adpcm.prevsample = prevsample;
-          }
-
-          uint8_t code = adpcmEncoder(samples[i], &prevsample, &previndex);
-
-          if (adpcmBuf.sampleCnt % 2 == 0)
-          {
-            adpcmBuf.data[adpcmBuf.sampleCnt / 2] = code;
+            wctx->adpcmBuf[i / 2] = code;
           }
           else
           {
-            adpcmBuf.data[adpcmBuf.sampleCnt / 2] |= (code << 4);
-          }
-
-          adpcmBuf.sampleCnt++;
-
-          if (adpcmBuf.sampleCnt == 480)
-          {
-            writePacket(&adpcmBuf);
-
-            if (playingState == true) // && currReadingAddr == adpcmBuf.address)
-            {
-              AdpcmPacket_t *adpkt = (AdpcmPacket_t*) List_get(&freeList);
-              if (adpkt)
-              {
-                // send packet to (live) player
-                memcpy(adpkt, PKT_ADPCM_START(&adpcmBuf),
-                       sizeof(AdpcmPacket_t));
-                List_put(&playingList, (List_Elem*) adpkt);
-                currReadingAddr++;
-                if (audioMoreDataAvailable)
-                  audioMoreDataAvailable();
-              }
-            }
-
-#if defined (LOG_ADPCM_PACKET)
-            if (uartTxReady && uartPktCnt < NUM_UART_PKT)
-            {
-              memcpy(&uartTxBuf[PKT_UART_SIZE * uartPktCnt], &adpcmBuf,
-              PKT_UART_SIZE);
-              uartPktCnt++;
-            }
-#endif
-
-            adpcmBuf.sampleCnt = 0;
+            wctx->adpcmBuf[i / 2] |= (code << 4);
           }
         }
 
-        List_put(&recordingList, (List_Elem*) ttt);
+        size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
+            + wctx->adpcmCountInSect * ADPCM_BUF_SIZE;
+        if (wctx->adpcmCountInSect == 0)
+        {
+          NVS_erase(nvsHandle, offset, SECT_SIZE);
+        }
+
+        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCM_BUF_SIZE,
+                  NVS_WRITE_POST_VERIFY);
+
+        // last adpcm buf in sect
+        if (wctx->adpcmCountInSect + 1 == ADPCM_BUF_COUNT_PER_SECT)
+        {
+          footnote_t fn = {};
+          fn.prevSample = wctx->prevSampleInSect;
+          fn.prevIndex = wctx->prevIndexInSect;
+          fn.dummy = 0;
+
+          updateSegments();
+          memcpy(fn.segments, segments, sizeof(segments));
+          checksum(&fn, sizeof(fn) - 2, &fn.cka, &fn.ckb);
+
+          offset += ADPCM_BUF_SIZE;
+          NVS_write(nvsHandle, offset, &fn, sizeof(fn), NVS_WRITE_POST_VERIFY);
+
+          incrementCounter();
+
+          wctx->currSect = MONOTONIC_COUNTER;
+          wctx->prevIndexInSect = wctx->prevIndex;
+          wctx->prevSampleInSect = wctx->prevSample;
+        }
+
+        wctx->adpcmCount++;
+        wctx->adpcmCountInSect = wctx->adpcmCount / ADPCM_BUF_COUNT_PER_SECT;
+
+        List_put(&wctx->recordingList, (List_Elem*) ttt);
       } /* end of if ttt != NULL */
     } /* end of AUDIO PCM EVENT */
 
@@ -722,21 +505,36 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
 static void startRecording(void)
 {
-  recStartAddr = currWritingAddr;
-  previndex = 0;
-  prevsample = 0;
+  wctx = &writeContext;
+  memset(wctx, 0, sizeof(writeContext));
+
+  wctx->adpcmCount = 0;
+  wctx->adpcmCountInSect = 0;
+  wctx->startSect = MONOTONIC_COUNTER;
+  wctx->currSect = wctx->startSect;
+  wctx->prevIndex = 0;
+  wctx->prevSample = 0;
+  wctx->prevIndexInSect = 0;
+  wctx->prevSampleInSect = 0;
+  wctx->finished = false;
+
+  List_clearList(&wctx->recordingList);
+  List_clearList(&wctx->processingList);
+
+  for (int k = 0; k < PCMBUF_NUM; k++)
+  {
+    I2S_Transaction_init(&wctx->i2sTransaction[k]);
+    wctx->i2sTransaction[k].bufPtr = &wctx->pcmBuf[k * PCMBUF_SIZE];
+    wctx->i2sTransaction[k].bufSize = PCMBUF_SIZE;
+    List_put(&wctx->recordingList, (List_Elem*) &wctx->i2sTransaction[k]);
+  }
 
 #ifdef LOG_PCM_PACKET
-  recPcmIndex = 0;
+  wctx->pcmIndex = 0;
 #endif
 
 #if defined(LOG_PCM_PACKET) || defined (LOG_ADPCM_PACKET)
-  uartPcmRequest = UARTREQ_INVALID;
-  uartAdpcmRequest = UARTREQ_INVALID;
-  if (uartHandle == NULL)
-  {
     UART_Params uartParams;
-
     UART_Params_init(&uartParams);
     uartParams.baudRate = 1500000; // 115200 * 8;
     uartParams.readMode = UART_MODE_CALLBACK;
@@ -747,28 +545,8 @@ static void startRecording(void)
     uartParams.writeMode = UART_MODE_CALLBACK;
     uartParams.writeDataMode = UART_DATA_BINARY;
     uartParams.writeCallback = uartWriteCallbackFxn;
-
     uartHandle = UART_open(Board_UART0, &uartParams);
-  }
 #endif
-
-  memset(&adpcmBuf, 0, sizeof(DataPacket_t));
-  adpcmBuf.preamble = PREAMBLE;
-
-  List_clearList(&recordingList);
-  List_clearList(&processingList);
-  recordingListSize = 0;
-  processingListSize = 0;
-
-  for (int k = 0; k < NUM_RECORD_PKT; k++)
-  {
-    recordingPkt[k].preamble = PREAMBLE;
-    I2S_Transaction_init(&i2sTransaction[k]);
-    i2sTransaction[k].bufPtr = &recordingPkt[k].data[0];
-    i2sTransaction[k].bufSize = 240;
-    List_put(&recordingList, (List_Elem*) &i2sTransaction[k]);
-    recordingListSize++;
-  }
 
   /*
    * In board file, I2S_SELECT must be HIGH.
@@ -809,7 +587,8 @@ static void startRecording(void)
   i2sParams.errorCallback = errCallbackFxn;
 
   i2sHandle = I2S_open(Board_I2S0, &i2sParams);
-  I2S_setReadQueueHead(i2sHandle, (I2S_Transaction*) List_head(&recordingList));
+  I2S_setReadQueueHead(i2sHandle,
+                       (I2S_Transaction*) List_head(&wctx->recordingList));
 
   /*
    * Start I2S streaming
@@ -850,10 +629,8 @@ static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
   {
 
     /* The finished transaction contains data that must be treated */
-    List_remove(&recordingList, (List_Elem*) transactionFinished);
-    recordingListSize--;
-    List_put(&processingList, (List_Elem*) transactionFinished);
-    processingListSize++;
+    List_remove(&wctx->recordingList, (List_Elem*) transactionFinished);
+    List_put(&wctx->processingList, (List_Elem*) transactionFinished);
 
     /* Start the treatment of the data */
     Semaphore_post(semDataReadyForTreatment);
@@ -1070,7 +847,7 @@ static void resetCounter(void)
   NVS_WRITE_POST_VERIFY);
 }
 
-static void readCounter(void)
+static void loadCounter(void)
 {
   static bool initialized = false;
   if (!initialized)
@@ -1116,32 +893,39 @@ static void incrementCounter(void)
   }
 }
 
-
-
-// write packet to flash
-static void writePacket(DataPacket_t *pkt)
+static void loadSegments(void)
 {
-  // TODO
-  checksum(&pkt->address, interval_of(DataPacket_t, address, cka), &pkt->cka,
-           &pkt->ckb);
+  if (MONOTONIC_COUNTER == 0) return;
 
-  size_t offset = pkt->address % DATA_BLOCK_COUNT * BLOCK_SIZE;
+  footnote_t fn = {};
+  size_t offset = (MONOTONIC_COUNTER - 1) % DATA_SECT_COUNT * SECT_SIZE + ADPCM_SIZE_PER_SECT;
+  NVS_read(nvsHandle, offset, &fn, sizeof(fn));
 
-  if ((offset & 0x0fff) == 0) // 4K aligned
+  uint8_t cka, ckb;
+  checksum(&fn, sizeof(fn) - 2, &cka, &ckb);
+  if (fn.cka == cka && fn.ckb == ckb && fn.segments[0] == MONOTONIC_COUNTER)
   {
-    NVS_erase(nvsHandle, offset, SECT_SIZE);
+    memcpy(segments, &fn.segments, sizeof(segments));
   }
+}
 
-  NVS_write(nvsHandle, offset, PKT_NVS_RECORD_START(pkt), PKT_NVS_RECORD_SIZE,
-  NVS_WRITE_POST_VERIFY);
-
-  if (pkt->address == currWritingAddr)
+static void updateSegments(void)
+{
+  if (segments[0] == (uint32_t) -1) // uninitialized
   {
-    currWritingAddr++;
-    if (currWritingAddr % 0xf == 0)
-    {
-      incrementCounter();
+    segments[1] = wctx->startSect;
+    segments[0] = wctx->currSect + 1;
+  }
+  else
+  {
+    if (segments[0] == wctx->startSect)
+    {  // first sector
+      for (int i = SEGMENT_NUM; i > 0; i--)
+      {
+        segments[i] = segments[i - 1];
+      }
     }
+    segments[0] = wctx->currSect + 1;
   }
 }
 
