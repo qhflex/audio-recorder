@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include <ti/sysbios/knl/Semaphore.h>
+
 void Audio_createTask(void);
 
 typedef struct __attribute__ ((__packed__))
@@ -19,36 +21,38 @@ typedef struct __attribute__ ((__packed__))
   uint8_t previndex;
   int16_t prevsample;
   uint8_t data[240];
-} AdpcmPacket_t ;
+} AdpcmPacket_t;
 
 _Static_assert(sizeof(AdpcmPacket_t)==244, "wrong adpcm packet size");
 
-/*
- * 'play' means start play, or seek. It could be called again when playing.
- * 'stopPlay' stops playing, flushing data, releasing resources.
- *
- * Noting that audio data producer has no knowledge on whether ble is
- * connected,or whether notification or indication is used. That's up to
- * ble module and is transparent to audio data producer.
- */
-void Audio_play(long position);
-void Audio_stopPlay();
+typedef enum {
+  RM_IDLE = 0,
+  RM_REQUESTED,
+  RM_PROCESSING_REQUEST,
+  RM_RESPONDED,
+  RM_PROCESSING_RESPONSE,
+} ReadStatus_t;
 
-#define AUDIO_POSITION_LIVE                         LONG_MAX
-#define AUDIO_POSITOIN_EARLIEST                     0
+typedef struct ReadMessage
+{
+  ReadStatus_t status;
+  int type;
+  uint32_t session;     // a unique number for identifying request session
+  uint32_t start;       // requested start sect
+  uint32_t major;       // sector
+  uint32_t minor;       // sub
+  uint8_t buf[256];
+  uint32_t readLen;
+} ReadMessage_t;
 
-/*
- * There are two lists inside, A and B.
- * I gave up to find a proper verb for the batch operation: List_get(&A),
- * List_put(&B), and finally List_head(&A) again. Alternatively, we use
- * a more policy-oriented name, and only one function, instead of two.
- */
-bool Audio_moreData(AdpcmPacket_t** pData);
-extern void (*audioMoreDataAvailable)(void);
-
-void Audio_moreSpace(void);
+extern ReadMessage_t readMessage; // singleton
 
 void Audio_startRecording();
 void Audio_stopRecording();
+
+/** this function is implemented by audio */
+void Audio_read();
+/** this function is implemented by caller, ble or uart */
+void Audio_readDone();
 
 #endif /* APPLICATION_AUDIO_H_ */

@@ -51,12 +51,14 @@
 #include <string.h>
 
 #include <xdc/runtime/Types.h>
+#include <xdc/runtime/Error.h>
 
 #include <ti/sysbios/BIOS.h>
 #include <ti/sysbios/knl/Task.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
 #include <ti/sysbios/knl/Queue.h>
+#include <ti/sysbios/knl/Semaphore.h>
 
 #include <ti/drivers/timer/GPTimerCC26XX.h>
 
@@ -80,7 +82,11 @@
 
 #include <board.h>
 
+#include "audio.h"
 #include "simple_peripheral.h"
+
+extern gattAttribute_t* simpleProfileChar1ValueAttrHandle;
+extern gattAttribute_t* simpleProfileChar1ConfigAttrHandle;
 
 /*********************************************************************
  * MACROS
@@ -123,13 +129,17 @@
 
 // Internal Events for RTOS application
 #define SP_ICALL_EVT                            ICALL_MSG_EVENT_ID // Event_Id_31
-#define SP_QUEUE_EVT                            UTIL_QUEUE_EVENT_ID // Event_Id_30
+#define SP_QUEUE_EVT                            Event_Id_30
 #define SP_SUBSCRIBE_EVT                        Event_Id_29
 #define SP_UNSUBSCRIBE_EVT                      Event_Id_28
-#define SP_HTIMER_EVT                           Event_Id_27
+#define SP_SEEK_EVT                             Event_Id_27
+#define SP_HTIMER_EVT                           Event_Id_26
+#define SP_READDONE_EVT                         Event_Id_25
 
 // Bitwise OR of all RTOS events to pend on
-#define SP_ALL_EVENTS                           (SP_ICALL_EVT | SP_QUEUE_EVT | SP_SUBSCRIBE_EVT | SP_UNSUBSCRIBE_EVT | SP_HTIMER_EVT)
+#define SP_ALL_EVENTS                           (SP_ICALL_EVT | SP_QUEUE_EVT | \
+                                                SP_SUBSCRIBE_EVT | SP_UNSUBSCRIBE_EVT | SP_SEEK_EVT |\
+                                                SP_HTIMER_EVT | SP_READDONE_EVT)
 
 // Size of string-converted device address ("0xXXXXXXXXXXXX")
 #define SP_ADDR_STR_SIZE                        15
@@ -140,6 +150,10 @@
 /*********************************************************************
  * TYPEDEFS
  */
+typedef enum
+{
+  NOTI_OFF = 0, NOTI_ON,
+} NotiStatus_t;
 
 /*********************************************************************
  * GLOBAL VARIABLES
@@ -153,6 +167,8 @@ Task_Struct spTask;
 #pragma data_alignment=8
 #endif
 uint8_t spTaskStack[SP_TASK_STACK_SIZE];
+
+ReadMessage_t readMessage;
 
 /*********************************************************************
  * LOCAL VARIABLES
@@ -228,15 +244,18 @@ static uint8 advHandleLegacy;
 // Address mode
 static GAP_Addr_Modes_t addrMode = DEFAULT_ADDRESS_MODE;
 
-static uint8_t charValue4[SIMPLEPROFILE_CHAR4_LEN] = {0};
+NotiStatus_t notiStatus = NOTI_OFF;
+
+static uint32_t seekSession = 0;
+static uint32_t seekSectRequested = (uint32_t)-1;
 
 static GPTimerCC26XX_Handle hTimer;
 
 void timerCallback(GPTimerCC26XX_Handle handle, GPTimerCC26XX_IntMask interruptMask) {
-    // interrupt callback code goes here. Minimize processing in interrupt.
-    uint32_t* pValue = (uint32_t*)charValue4;
-    (*pValue)++;
+  if (readMessage.status == RM_PROCESSING_RESPONSE)
+  {
     Event_post(syncEvent, SP_HTIMER_EVT);
+  }
 }
 
 /*********************************************************************
@@ -253,6 +272,7 @@ static uint8_t SimplePeripheral_addConn(uint16_t connHandle);
 static uint8_t SimplePeripheral_getConnIndex(uint16_t connHandle);
 static uint8_t SimplePeripheral_removeConn(uint16_t connHandle);
 static uint8_t SimplePeripheral_clearConnListEntry(uint16_t connHandle);
+static void SimplePeripheral_tryNotify(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -311,6 +331,19 @@ void SimplePeripheral_unsubscribe(void)
 {
   Event_post(syncEvent, SP_UNSUBSCRIBE_EVT);
 }
+
+void SimplePeripheral_seek(uint32_t sect)
+{
+  seekSectRequested = sect;
+  Event_post(syncEvent, SP_SEEK_EVT);
+}
+
+void Audio_readDone()
+{
+  readMessage.status = RM_RESPONDED;
+  Event_post(syncEvent, SP_READDONE_EVT);
+}
+
 /*********************************************************************
  * @fn      SimplePeripheral_init
  *
@@ -388,6 +421,9 @@ static void SimplePeripheral_init(void)
   params.direction      = GPTimerCC26XX_DIRECTION_UP;
   params.debugStallMode = GPTimerCC26XX_DEBUG_STALL_OFF;
   hTimer = GPTimerCC26XX_open(Board_GPTIMER0A, &params); // Board_GPTIMER0A
+
+  readMessage.status = RM_IDLE;
+  readMessage.session = seekSession;
 }
 
 /*********************************************************************
@@ -452,17 +488,64 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         GPTimerCC26XX_setLoadValue(hTimer, loadVal);
         GPTimerCC26XX_registerInterrupt(hTimer, timerCallback, GPT_INT_TIMEOUT);
         GPTimerCC26XX_start(hTimer);
+
+        notiStatus = NOTI_ON;
       }
 
       if (events & SP_UNSUBSCRIBE_EVT)
       {
         GPTimerCC26XX_stop(hTimer);
+        notiStatus = NOTI_OFF;
+      }
+
+      if (events & SP_SEEK_EVT)
+      {
+        if (notiStatus == NOTI_ON)
+        {
+          if (readMessage.status == RM_IDLE)
+          {
+            readMessage.session = seekSession;
+            readMessage.start = seekSectRequested;
+            readMessage.major = readMessage.start;
+            readMessage.minor = 0;
+            Audio_read();
+          }
+        }
+        else
+        {
+          seekSession = readMessage.session;
+        }
+      }
+
+      if (events & SP_READDONE_EVT && readMessage.status == RM_RESPONDED)
+      {
+        if (notiStatus == NOTI_OFF)
+        {
+          readMessage.status = RM_IDLE;
+        }
+        else
+        {
+          if (seekSession != readMessage.session)
+          {
+            readMessage.session = seekSession;
+            readMessage.start = seekSectRequested;
+            readMessage.major = readMessage.start;
+            readMessage.minor = 0;
+            Audio_read();
+          }
+          else
+          {
+            SimplePeripheral_tryNotify();
+          }
+        }
       }
 
       if (events & SP_HTIMER_EVT)
       {
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, SIMPLEPROFILE_CHAR4_LEN,
-                                   charValue4);
+        if (notiStatus == NOTI_ON && readMessage.status == RM_PROCESSING_RESPONSE)
+        {
+          SimplePeripheral_tryNotify();
+        }
       }
     }
   }
@@ -634,7 +717,8 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg)
       // Start advertising since there is room for more connections
       GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX , 0);
 
-      GPTimerCC26XX_stop(hTimer);
+      notiStatus = NOTI_OFF;
+      // GPTimerCC26XX_stop(hTimer);
       break;
     }
 
@@ -765,6 +849,42 @@ static uint8_t SimplePeripheral_removeConn(uint16_t connHandle)
   }
 
   return connIndex;
+}
+
+static void SimplePeripheral_tryNotify(void)
+{
+  attHandleValueNoti_t noti;
+  bStatus_t status;
+
+  noti.pValue = (uint8_t*) GATT_bm_alloc(connList[0], ATT_HANDLE_VALUE_NOTI,
+                                         readMessage.readLen, &noti.len);
+  if (noti.pValue == NULL)
+  {
+    return;
+  }
+
+  memcpy(noti.pValue, readMessage.buf, noti.len);
+  noti.handle = simpleProfileChar1ValueAttrHandle->handle;
+  status = GATT_Notification(connList[0], &noti, 0);
+
+  /*
+   * If mtu is not requested to be 251, we got 0x1B.
+   * #define  bleInvalidMtuSize   0x1B
+   */
+  if (status == SUCCESS)
+  {
+    readMessage.minor++;
+    if (readMessage.minor == 17) {
+      readMessage.major++;
+      readMessage.minor = 0;
+    }
+
+    Audio_read();
+  }
+  else
+  {
+    GATT_bm_free((gattMsg_t*) &noti, ATT_HANDLE_VALUE_NOTI);
+  }
 }
 
 /*********************************************************************

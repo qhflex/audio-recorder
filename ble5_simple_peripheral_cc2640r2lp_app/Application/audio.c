@@ -82,7 +82,8 @@
 #define AUDIO_PCM_EVT                     Event_Id_00
 #define AUDIO_START_REC                   Event_Id_01
 #define AUDIO_STOP_REC                    Event_Id_02
-#define AUDIO_EVENTS                      (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC)
+#define AUDIO_READ_EVT                    Event_Id_03
+#define AUDIO_EVENTS                      (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC | AUDIO_READ_EVT )
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -153,10 +154,17 @@ typedef struct __attribute__ ((__packed__)) footnote
   uint8_t ckb;
 } footnote_t;
 
+typedef struct __attribute__ ((__packed__)) footnote_head
+{
+  uint16_t prevSample;
+  uint8_t prevIndex;
+  uint8_t dummy;
+  uint32_t segments[2];
+} footnote_head_t;
+
 _Static_assert(sizeof(footnote_t)==90, "wrong footnote size");
 
 #ifdef LOG_ADPCM_DATA
-
 typedef struct __attribute__ ((__packed__)) UartPacket
 {
   uint64_t preamble;    // 0
@@ -180,7 +188,6 @@ _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22,
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22,
                "wrong uart packet size");  // 222
 #endif
-
 #endif
 
 /*********************************************************************
@@ -297,6 +304,17 @@ static void startRecording(void);
 static void stopRecording(void);
 
 /*********************************************************************
+ * @fn      Audio_read
+ *
+ * @brief   Task creation function for the Simple Peripheral.
+ */
+void Audio_read()
+{
+  readMessage.status = RM_REQUESTED;
+  Event_post(audioEvent, AUDIO_READ_EVT);
+}
+
+/*********************************************************************
  * @fn      I2sMic_createTask
  *
  * @brief   Task creation function for the I2s Mic.
@@ -370,7 +388,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
   for (int loop = 0;; loop++)
   {
     uint32_t event = Event_pend(audioEvent, NULL, AUDIO_EVENTS,
-    BIOS_WAIT_FOREVER);
+                                BIOS_WAIT_FOREVER);
     if (event & AUDIO_START_REC)
     {
       startRecording();
@@ -483,6 +501,53 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         }
       } /* end of if ttt != NULL */
     } /* end of AUDIO PCM EVENT */
+
+    if (event & AUDIO_READ_EVT)
+    {
+      readMessage.status = RM_PROCESSING_REQUEST;
+    }
+
+    if (readMessage.status == RM_PROCESSING_REQUEST)
+    {
+      uint32_t counter = MONOTONIC_COUNTER;
+      if (counter >= DATA_SECT_COUNT && readMessage.major <= counter - DATA_SECT_COUNT)
+      {
+        readMessage.major = counter - DATA_SECT_COUNT + 1;
+      }
+
+      if (readMessage.major < counter)
+      {
+        if (readMessage.minor == 0)
+        {
+          uint8_t head[12];
+          size_t offset = readMessage.major % DATA_SECT_COUNT + ADPCM_BUF_COUNT_PER_SECT * ADPCMBUF_SIZE;
+          NVS_read(nvsHandle, offset, head, sizeof(head));
+          readMessage.buf[0] = head[4];
+          readMessage.buf[1] = head[5];
+          readMessage.buf[2] = head[6];
+          readMessage.buf[3] = head[7];
+          readMessage.buf[4] = head[8];
+          readMessage.buf[5] = head[9];
+          readMessage.buf[6] = head[10];
+          readMessage.buf[7] = head[11];
+          readMessage.buf[8] = head[0];
+          readMessage.buf[9] = head[1];
+          readMessage.buf[10] = head[2];
+          readMessage.buf[11] = head[3];
+          offset = readMessage.major % DATA_SECT_COUNT;
+          NVS_read(nvsHandle, offset, &readMessage.buf[12], 236 - 12);
+          readMessage.readLen = 236;
+        }
+        else
+        {
+          size_t offset = readMessage.major % DATA_SECT_COUNT + 224 + readMessage.minor * 236;
+          NVS_read(nvsHandle, offset, readMessage.buf, 236);
+          readMessage.readLen = 236;
+        }
+
+        Audio_readDone();
+      }
+    }
 
     if (loop > 50000)
     {

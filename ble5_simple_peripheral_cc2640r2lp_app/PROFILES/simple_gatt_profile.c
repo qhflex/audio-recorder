@@ -164,6 +164,9 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
     },
 };
 
+gattAttribute_t* simpleProfileChar1ValueAttrHandle = &simpleProfileAttrTbl[2];
+gattAttribute_t* simpleProfileChar1ConfigAttrHandle = &simpleProfileAttrTbl[3];
+
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
