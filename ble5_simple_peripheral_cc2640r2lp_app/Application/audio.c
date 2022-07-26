@@ -104,7 +104,8 @@
 /*********************************************************************
  * TYPEDEFS
  */
-#define ADPCMBUF_SIZE                     80
+#define ADPCMBUF_SIZE                     40
+#define ADPCMBUF_NUM                      4
 #define PCMBUF_SIZE                       (ADPCMBUF_SIZE * 4)
 #define PCM_SAMPLES_PER_BUF               (PCMBUF_SIZE / sizeof(int16_t))
 #define PCMBUF_NUM                        4
@@ -123,7 +124,7 @@ typedef struct WriteContext
   List_List processingList;
 
   uint8_t pcmBuf[PCMBUF_TOTAL_SIZE];
-  uint8_t adpcmBuf[ADPCMBUF_SIZE];
+  uint8_t adpcmBuf[ADPCMBUF_NUM][ADPCMBUF_SIZE];
 
   uint32_t adpcmCount;
   uint32_t adpcmCountInSect;
@@ -176,7 +177,8 @@ typedef struct __attribute__ ((__packed__)) UartPacket
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22,
                "wrong uart packet size"); //1022
 #else
-_Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22, "wrong uart packet size");  // 222
+_Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22,
+               "wrong uart packet size");  // 222
 #endif
 
 #endif
@@ -392,6 +394,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         uint8_t uartPrevIndex = wctx->prevIndex;
 #endif
 
+        uint16_t adpcmInUse = wctx->adpcmCount % ADPCMBUF_NUM;
+
         int16_t *samples = (int16_t*) ttt->bufPtr;
         for (int i = 0; i < PCM_SAMPLES_PER_BUF; i++)
         {
@@ -399,11 +403,11 @@ static void Audio_taskFxn(UArg a0, UArg a1)
                                       &wctx->prevIndex);
           if (i % 2 == 0)
           {
-            wctx->adpcmBuf[i / 2] = code;
+            wctx->adpcmBuf[adpcmInUse][i / 2] = code;
           }
           else
           {
-            wctx->adpcmBuf[i / 2] |= (code << 4);
+            wctx->adpcmBuf[adpcmInUse][i / 2] |= (code << 4);
           }
         }
 
@@ -420,28 +424,28 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 #else
         uartPkt.dummy = 0;
 #endif
-        memcpy(uartPkt.adpcm, wctx->adpcmBuf, ADPCMBUF_SIZE);
-        checksum(
-            &uartPkt.startSect,
-            offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect),
-            &uartPkt.cka, &uartPkt.ckb);
+        memcpy(uartPkt.adpcm, wctx->adpcmBuf[adpcmInUse], ADPCMBUF_SIZE);
+        checksum(&uartPkt.startSect,
+        offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect),
+                 &uartPkt.cka, &uartPkt.ckb);
         UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
 #endif
 
         List_put(&wctx->recordingList, (List_Elem*) ttt);
 
-
-
-        size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
-            + wctx->adpcmCountInSect * ADPCMBUF_SIZE;
-
-        uint32_t ts = Timestamp_get32();
-        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCMBUF_SIZE, 0); // NVS_WRITE_POST_VERIFY);
-        if (wctx->adpcmCountInSect == 0)
+        if (adpcmInUse == ADPCMBUF_NUM - 1)
         {
-          Log_info3("total %d, freq lo %d, adpcmCount %d", Timestamp_get32() - ts, freq.lo, wctx->adpcmCount);
-        }
+          size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
+              + (wctx->adpcmCountInSect - 1) * ADPCMBUF_SIZE;
 
+          uint32_t ts = Timestamp_get32();
+          NVS_write(nvsHandle, offset, wctx->adpcmBuf[0],
+                    ADPCMBUF_SIZE * ADPCMBUF_NUM, 0); // NVS_WRITE_POST_VERIFY);
+//          if (wctx->adpcmCountInSect == ADPCMBUF_NUM - 1)
+//          {
+//            Log_info2("nvs_write %d, adpcmCount %d", Timestamp_get32() - ts, wctx->adpcmCount);
+//          }
+        }
 
         // last adpcm buf in sect
         if (wctx->adpcmCountInSect + 1 == ADPCM_BUF_COUNT_PER_SECT)
@@ -456,7 +460,9 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           memcpy(fn.segments, segments, sizeof(segments));
           checksum(&fn, sizeof(fn) - 2, &fn.cka, &fn.ckb);
 
-          offset += ADPCMBUF_SIZE;
+          size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
+              + ADPCM_BUF_COUNT_PER_SECT * ADPCMBUF_SIZE;
+          // offset += ADPCMBUF_SIZE;
           // NVS_write(nvsHandle, offset, &fn, sizeof(fn), NVS_WRITE_POST_VERIFY);
           NVS_write(nvsHandle, offset, &fn, sizeof(fn), 0);
 
@@ -472,7 +478,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
         if (wctx->adpcmCountInSect == 0)
         {
-          NVS_erase(nvsHandle, ((wctx->currSect + 1) % DATA_SECT_COUNT) * SECT_SIZE, SECT_SIZE);
+          NVS_erase(nvsHandle, (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE,
+                    SECT_SIZE);
         }
       } /* end of if ttt != NULL */
     } /* end of AUDIO PCM EVENT */
@@ -502,7 +509,8 @@ static void startRecording(void)
   wctx->prevSampleInSect = 0;
   wctx->finished = false;
 
-  NVS_erase(nvsHandle, (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE, SECT_SIZE * 2);
+  NVS_erase(nvsHandle, (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE,
+            SECT_SIZE);
 
   Task_sleep(10 * 1000 / Clock_tickPeriod);
 
