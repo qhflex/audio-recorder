@@ -448,7 +448,7 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         Types_FreqHz  freq;
         BIOS_getCpuFreq(&freq);
         // GPTimerCC26XX_Value loadVal = freq.lo / 1000 - 1; //47999
-        GPTimerCC26XX_Value loadVal = freq.lo / 50 - 1; //4799999
+        GPTimerCC26XX_Value loadVal = freq.lo - 1;
         GPTimerCC26XX_setLoadValue(hTimer, loadVal);
         GPTimerCC26XX_registerInterrupt(hTimer, timerCallback, GPT_INT_TIMEOUT);
         GPTimerCC26XX_start(hTimer);

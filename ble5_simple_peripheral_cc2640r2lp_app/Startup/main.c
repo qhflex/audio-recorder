@@ -141,8 +141,13 @@ int main()
   /* Start tasks of external images - Priority 5 */
   ICall_createRemoteTasks();
 
+#ifndef BLE_ONLY
   Audio_createTask();
+#endif
+
+#ifndef AUDIO_ONLY
   SimplePeripheral_createTask();
+#endif
 
   /* enable interrupts and start SYS/BIOS */
   BIOS_start();

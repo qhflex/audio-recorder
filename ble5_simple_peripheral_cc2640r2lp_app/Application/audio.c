@@ -11,15 +11,16 @@
 #include <string.h>
 #include <assert.h>
 
+#include <xdc/runtime/Types.h>
 #include <xdc/runtime/Error.h>
 #include <xdc/runtime/Log.h>
 #include <xdc/runtime/System.h>
+#include <xdc/runtime/Timestamp.h>
 
 #include <ti/sysbios/BIOS.h>
 #include <ti/sysbios/gates/GateSwi.h>
 #include <ti/sysbios/knl/Task.h>
 #include <ti/sysbios/knl/Semaphore.h>
-#include <ti/sysbios/knl/Mailbox.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
 
@@ -51,9 +52,8 @@
  * MACROS
  */
 
-// #define LOG_ADPCM_DATA
+#define LOG_ADPCM_DATA
 // #define LOG_PCM_DATA
-// #define NO_FLASH_WRITE
 
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
@@ -101,17 +101,13 @@
  */
 #define MONOTONIC_COUNTER                 ((((uint32_t)(markedBitsHi >> 1) - 1) << 15) + (uint32_t)(markedBitsLo - 1))
 
-//#define BLOCK_SIZE                        256
-//#define BLOCKS_PER_SECT                   (SECT_SIZE / BLOCK_SIZE)
-//#define DATA_BLOCK_COUNT                  (DATA_SECT_COUNT * BLOCKS_PER_SECT)
-
 /*********************************************************************
  * TYPEDEFS
  */
-#define ADPCMBUF_SIZE                     160
+#define ADPCMBUF_SIZE                     80
 #define PCMBUF_SIZE                       (ADPCMBUF_SIZE * 4)
 #define PCM_SAMPLES_PER_BUF               (PCMBUF_SIZE / sizeof(int16_t))
-#define PCMBUF_NUM                        3
+#define PCMBUF_NUM                        4
 #define PCMBUF_TOTAL_SIZE                 (PCMBUF_SIZE * PCMBUF_NUM)
 
 #define ADPCM_SIZE_PER_SECT               4000
@@ -177,7 +173,8 @@ typedef struct __attribute__ ((__packed__)) UartPacket
 } UartPacket_t;
 
 #ifdef LOG_PCM_DATA
-_Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22, "wrong uart packet size"); //1022
+_Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22,
+               "wrong uart packet size"); //1022
 #else
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22, "wrong uart packet size");  // 222
 #endif
@@ -360,6 +357,9 @@ static void Audio_init(void)
  */
 static void Audio_taskFxn(UArg a0, UArg a1)
 {
+  Types_FreqHz freq;
+  Timestamp_getFreq(&freq);
+
   Audio_init();
   loadCounter();
   loadSegments();
@@ -368,7 +368,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
   for (int loop = 0;; loop++)
   {
     uint32_t event = Event_pend(audioEvent, NULL, AUDIO_EVENTS,
-                                BIOS_WAIT_FOREVER);
+    BIOS_WAIT_FOREVER);
     if (event & AUDIO_START_REC)
     {
       startRecording();
@@ -421,32 +421,33 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         uartPkt.dummy = 0;
 #endif
         memcpy(uartPkt.adpcm, wctx->adpcmBuf, ADPCMBUF_SIZE);
-        checksum(&uartPkt.startSect, offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect), &uartPkt.cka, &uartPkt.ckb);
+        checksum(
+            &uartPkt.startSect,
+            offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect),
+            &uartPkt.cka, &uartPkt.ckb);
         UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
 #endif
 
         List_put(&wctx->recordingList, (List_Elem*) ttt);
 
-#ifndef NO_FLASH_WRITE
+
+
         size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
             + wctx->adpcmCountInSect * ADPCMBUF_SIZE;
 
-
+        uint32_t ts = Timestamp_get32();
+        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCMBUF_SIZE, 0); // NVS_WRITE_POST_VERIFY);
         if (wctx->adpcmCountInSect == 0)
         {
-
-          NVS_erase(nvsHandle, offset, SECT_SIZE);
-
+          Log_info3("total %d, freq lo %d, adpcmCount %d", Timestamp_get32() - ts, freq.lo, wctx->adpcmCount);
         }
 
-        NVS_write(nvsHandle, offset, wctx->adpcmBuf, ADPCMBUF_SIZE, 0); // NVS_WRITE_POST_VERIFY);
-#endif
 
         // last adpcm buf in sect
         if (wctx->adpcmCountInSect + 1 == ADPCM_BUF_COUNT_PER_SECT)
         {
           updateSegments();
-#ifndef NO_FLASH_WRITE
+
           footnote_t fn = { };
           fn.prevSample = wctx->prevSampleInSect;
           fn.prevIndex = wctx->prevIndexInSect;
@@ -460,7 +461,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           NVS_write(nvsHandle, offset, &fn, sizeof(fn), 0);
 
           incrementCounter();
-#endif
+
           wctx->currSect++;
           wctx->prevIndexInSect = wctx->prevIndex;
           wctx->prevSampleInSect = wctx->prevSample;
@@ -468,10 +469,16 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
         wctx->adpcmCount++;
         wctx->adpcmCountInSect = wctx->adpcmCount % ADPCM_BUF_COUNT_PER_SECT;
+
+        if (wctx->adpcmCountInSect == 0)
+        {
+          NVS_erase(nvsHandle, ((wctx->currSect + 1) % DATA_SECT_COUNT) * SECT_SIZE, SECT_SIZE);
+        }
       } /* end of if ttt != NULL */
     } /* end of AUDIO PCM EVENT */
 
-    if (loop > 2000) {
+    if (loop > 50000)
+    {
       while (1)
       {
         Task_sleep(1000 / Clock_tickPeriod);
@@ -494,6 +501,10 @@ static void startRecording(void)
   wctx->prevIndexInSect = 0;
   wctx->prevSampleInSect = 0;
   wctx->finished = false;
+
+  NVS_erase(nvsHandle, (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE, SECT_SIZE * 2);
+
+  Task_sleep(10 * 1000 / Clock_tickPeriod);
 
   List_clearList(&wctx->recordingList);
   List_clearList(&wctx->processingList);
