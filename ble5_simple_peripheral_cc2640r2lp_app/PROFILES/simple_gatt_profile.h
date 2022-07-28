@@ -55,13 +55,15 @@ extern "C" {
 /*********************************************************************
  * INCLUDES
  */
+#include <hal_types.h>
+#include <bcomdef.h>
 
 /*********************************************************************
  * CONSTANTS
  */
-
-
-#define SIMPLEPROFILE_CHAR4                     3  // RW uint8 - Profile Characteristic 4 value
+#define SIMPLEPROFILE_CHAR1                     0  // RW uint8 - Profile Characteristic 4 value
+#define SIMPLEPROFILE_CHAR2                     1
+#define SIMPLEPROFILE_CHAR3                     2
 
 // Simple Profile 128-bit UUID base: 7c95XXXX-6d0c-436f-81c8-3fd7e3db0610
 #define SIMPLEPROFILE_BASE_UUID_128( uuid ) \
@@ -72,13 +74,18 @@ extern "C" {
 #define SIMPLEPROFILE_SERV_UUID                 0x9500
 
 // Key Pressed UUID
-#define SIMPLEPROFILE_CHAR4_UUID                0x9501
+#define SIMPLEPROFILE_CHAR1_UUID                0x9501
+#define SIMPLEPROFILE_CHAR2_UUID                0x9502
+#define SIMPLEPROFILE_CHAR3_UUID                0x9503
 
 // Simple Keys Profile Services bit fields
 #define SIMPLEPROFILE_SERVICE                   0x00000001
 
 // Length of Characteristic 4 in bytes
-#define SIMPLEPROFILE_CHAR4_LEN                 244
+#define SIMPLEPROFILE_CHAR1_LEN                 1
+#define SIMPLEPROFILE_CHAR3_LEN                 2 // change to size of segments
+
+extern uint8_t simpleProfileChar2;                // recording
 
 /*********************************************************************
  * TYPEDEFS

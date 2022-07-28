@@ -36,16 +36,35 @@
 
 #include <board.h>
 
+#include "simple_gatt_profile.h"
+
 #include "audio.h"
+
 
 /*********************************************************************
  *
- * Notification
+ * How data stored
  *
- * 1. User starts char notification.
- * 2. SimplePeripheral -> Audio_play(), this will set maxPlayingListSize
- *    and post an event.
- * 3. noticing that ...
+ * First, the last 16 sectors are reserved. Only DATA_SECT_COUNT sectors
+ * are used for storing adpcm data (and per sector metadata).
+ *
+ * There is a strictly incremental MONOTONIC_COUNTER implemented using
+ * "bit-creeping" trick and consumes last two sectors. This counter records
+ * how much data sectors have been written.
+ *
+ * Since the data sectors are used as cyclic array, it is possible the
+ * sector index is larger than DATA_SECT_COUNT. So each sector saves its
+ * sector index (currSect) in metadata.
+ *
+ * Each sector stores exactly 4000 bytes in adpcm format, which counts for
+ * 8000 samples.
+ *
+ * Each sector also has a 96-byte header, consisting of 21 sect indices,
+ * a magic number (4 bytes), a currSect (4 bytes), and an adpcm state (4 bytes).
+ * The last sect index is nextSect, which is technically redundant. But
+ * this is convenient for data storing and retrieving. The 21 sect indices
+ * are interpretted as 20 segments [start, end).
+ *
  */
 
 /*********************************************************************
@@ -93,7 +112,7 @@
 #define MAGIC_OFFSET                      (HISECT_OFFSET + 2048)
 #define LOSECT_INDEX                      (SECT_COUNT - 2)
 #define LOSECT_OFFSET                     (LOSECT_INDEX * SECT_SIZE)
-#define DATA_SECT_COUNT                   (SECT_COUNT - 2)
+#define DATA_SECT_COUNT                   (SECT_COUNT - 16)
 
 #define SECT_OFFSET(index)                (index * SECT_SIZE)
 
@@ -117,52 +136,41 @@
 
 #define SEGMENT_NUM                       20
 
+typedef struct __attribute__ ((__packed__)) AdpcmState
+{
+  int16_t sample;
+  uint8_t index;
+  uint8_t dummy;
+} AdpcmState_t;
+
+_Static_assert(sizeof(AdpcmState_t)==4, "wrong size of adpcm state");
+
+#define NUM_PREV_STARTS                   21
+#define NUM_TOTAL_STARTS                  22
+
 typedef struct WriteContext
 {
+  uint32_t prevStarts[NUM_PREV_STARTS];
+  uint32_t currStart;
+  uint32_t currPos;
+  AdpcmState_t sectAdpcmState;  // sector-wise adpcm state
+  uint8_t adpcmBuf[ADPCMBUF_NUM][ADPCMBUF_SIZE];
+
+  uint8_t pcmBuf[PCMBUF_TOTAL_SIZE];
+
+  AdpcmState_t adpcmState;
+  uint32_t adpcmCount;
+  uint32_t adpcmCountInSect;
+
   I2S_Transaction i2sTransaction[PCMBUF_NUM];
 
   List_List recordingList;
   List_List processingList;
 
-  uint8_t pcmBuf[PCMBUF_TOTAL_SIZE];
-  uint8_t adpcmBuf[ADPCMBUF_NUM][ADPCMBUF_SIZE];
-
-  uint32_t adpcmCount;
-  uint32_t adpcmCountInSect;
-
-  uint32_t startSect;
-  uint32_t currSect;
-
-  /* these are working adpcm state */
-  int16_t prevSample;
-  uint8_t prevIndex;
-
-  /* these records initial adpcm state for a sector */
-  int16_t prevSampleInSect;
-  uint8_t prevIndexInSect;
-
   bool finished;
 } WriteContext_t;
 
-typedef struct __attribute__ ((__packed__)) footnote
-{
-  uint16_t prevSample;
-  uint8_t prevIndex;
-  uint8_t dummy;
-  uint32_t segments[SEGMENT_NUM + 1];
-  uint8_t cka;
-  uint8_t ckb;
-} footnote_t;
-
-typedef struct __attribute__ ((__packed__)) footnote_head
-{
-  uint16_t prevSample;
-  uint8_t prevIndex;
-  uint8_t dummy;
-  uint32_t segments[2];
-} footnote_head_t;
-
-_Static_assert(sizeof(footnote_t)==90, "wrong footnote size");
+_Static_assert(offsetof(WriteContext_t, pcmBuf)==256, "wrong write context (header) size");
 
 #ifdef LOG_ADPCM_DATA
 typedef struct __attribute__ ((__packed__)) UartPacket
@@ -298,10 +306,22 @@ static void resetCounter(void);
 static uint32_t readMagic(void);
 static void loadCounter(void);
 static void incrementCounter(void);
-static void loadSegments(void);
-static void updateSegments(void);
+
+static void loadPrevStarts(void);
+// static void updateSegments(void);
+
 static void startRecording(void);
 static void stopRecording(void);
+
+void Audio_startRecording(void)
+{
+
+}
+
+void Audio_stopRecording(void)
+{
+
+}
 
 /*********************************************************************
  * @fn      Audio_read
@@ -382,7 +402,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
   Audio_init();
   loadCounter();
-  loadSegments();
+  loadPrevStarts();
   Event_post(audioEvent, AUDIO_START_REC);
 
   for (int loop = 0;; loop++)
@@ -402,104 +422,91 @@ static void Audio_taskFxn(UArg a0, UArg a1)
     if (event & AUDIO_PCM_EVT)
     {
       Semaphore_pend(semDataReadyForTreatment, BIOS_NO_WAIT);
-      I2S_Transaction *ttt = (I2S_Transaction*) List_get(&wctx->processingList);
-      if (ttt != NULL)
+
+      if (!wctx->finished)
       {
-
-#ifdef LOG_ADPCM_DATA
-        /* save a copy */
-        int16_t uartPrevSample = wctx->prevSample;
-        uint8_t uartPrevIndex = wctx->prevIndex;
-#endif
-
-        uint16_t adpcmInUse = wctx->adpcmCount % ADPCMBUF_NUM;
-
-        int16_t *samples = (int16_t*) ttt->bufPtr;
-        for (int i = 0; i < PCM_SAMPLES_PER_BUF; i++)
+        I2S_Transaction *ttt = (I2S_Transaction*) List_get(&wctx->processingList);
+        if (ttt != NULL)
         {
-          uint8_t code = adpcmEncoder(samples[i], &wctx->prevSample,
-                                      &wctx->prevIndex);
-          if (i % 2 == 0)
+
+  #ifdef LOG_ADPCM_DATA
+          /* save a copy */
+          int16_t uartPrevSample = wctx->adpcmState.sample;
+          uint8_t uartPrevIndex = wctx->adpcmState.index;
+  #endif
+
+          uint16_t adpcmInUse = wctx->adpcmCount % ADPCMBUF_NUM;
+
+          int16_t *samples = (int16_t*) ttt->bufPtr;
+          for (int i = 0; i < PCM_SAMPLES_PER_BUF; i++)
           {
-            wctx->adpcmBuf[adpcmInUse][i / 2] = code;
+            uint8_t code = adpcmEncoder(samples[i], &wctx->adpcmState.sample,
+                                        &wctx->adpcmState.index);
+            if (i % 2 == 0)
+            {
+              wctx->adpcmBuf[adpcmInUse][i / 2] = code;
+            }
+            else
+            {
+              wctx->adpcmBuf[adpcmInUse][i / 2] |= (code << 4);
+            }
           }
-          else
+
+  #ifdef LOG_ADPCM_DATA
+          Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);
+          uartPkt.preamble = PREAMBLE;
+          uartPkt.startSect = wctx->currStart;
+          uartPkt.index = wctx->adpcmCount;
+          uartPkt.prevSample = uartPrevSample;
+          uartPkt.prevIndex = uartPrevIndex;
+  #ifdef LOG_PCM_DATA
+          uartPkt.dummy = 1;
+          memcpy(uartPkt.pcm, ttt->bufPtr, PCMBUF_SIZE);
+  #else
+          uartPkt.dummy = 0;
+  #endif
+          memcpy(uartPkt.adpcm, wctx->adpcmBuf[adpcmInUse], ADPCMBUF_SIZE);
+          checksum(&uartPkt.startSect,
+          offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect),
+                   &uartPkt.cka, &uartPkt.ckb);
+          UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
+  #endif
+
+          List_put(&wctx->recordingList, (List_Elem*) ttt);
+
+          if (adpcmInUse == ADPCMBUF_NUM - 1)
           {
-            wctx->adpcmBuf[adpcmInUse][i / 2] |= (code << 4);
+            if (wctx->adpcmCountInSect == adpcmInUse)
+            {
+              // uint32_t bufCount = 0;
+              size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE;
+              NVS_write(nvsHandle, offset, wctx, 96 + ADPCMBUF_SIZE * ADPCMBUF_NUM, 0);
+            }
+            else
+            {
+              uint32_t writtenBufCount = wctx->adpcmCountInSect % ADPCMBUF_NUM * ADPCMBUF_NUM;
+              size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE
+                  + 96 + writtenBufCount * ADPCMBUF_SIZE;
+              NVS_write(nvsHandle, offset, &wctx->adpcmBuf[0],
+                        ADPCMBUF_SIZE * ADPCMBUF_NUM, 0); // NVS_WRITE_POST_VERIFY);
+            }
           }
-        }
 
-#ifdef LOG_ADPCM_DATA
-        Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);
-        uartPkt.preamble = PREAMBLE;
-        uartPkt.startSect = wctx->startSect;
-        uartPkt.index = wctx->adpcmCount;
-        uartPkt.prevSample = uartPrevSample;
-        uartPkt.prevIndex = uartPrevIndex;
-#ifdef LOG_PCM_DATA
-        uartPkt.dummy = 1;
-        memcpy(uartPkt.pcm, ttt->bufPtr, PCMBUF_SIZE);
-#else
-        uartPkt.dummy = 0;
-#endif
-        memcpy(uartPkt.adpcm, wctx->adpcmBuf[adpcmInUse], ADPCMBUF_SIZE);
-        checksum(&uartPkt.startSect,
-        offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect),
-                 &uartPkt.cka, &uartPkt.ckb);
-        UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
-#endif
+          wctx->adpcmCount++;
+          wctx->adpcmCountInSect = wctx->adpcmCount % ADPCM_BUF_COUNT_PER_SECT;
 
-        List_put(&wctx->recordingList, (List_Elem*) ttt);
-
-        if (adpcmInUse == ADPCMBUF_NUM - 1)
-        {
-          size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
-              + (wctx->adpcmCountInSect - 1) * ADPCMBUF_SIZE;
-
-          uint32_t ts = Timestamp_get32();
-          NVS_write(nvsHandle, offset, wctx->adpcmBuf[0],
-                    ADPCMBUF_SIZE * ADPCMBUF_NUM, 0); // NVS_WRITE_POST_VERIFY);
-//          if (wctx->adpcmCountInSect == ADPCMBUF_NUM - 1)
-//          {
-//            Log_info2("nvs_write %d, adpcmCount %d", Timestamp_get32() - ts, wctx->adpcmCount);
-//          }
-        }
-
-        // last adpcm buf in sect
-        if (wctx->adpcmCountInSect + 1 == ADPCM_BUF_COUNT_PER_SECT)
-        {
-          updateSegments();
-
-          footnote_t fn = { };
-          fn.prevSample = wctx->prevSampleInSect;
-          fn.prevIndex = wctx->prevIndexInSect;
-          fn.dummy = 0;
-
-          memcpy(fn.segments, segments, sizeof(segments));
-          checksum(&fn, sizeof(fn) - 2, &fn.cka, &fn.ckb);
-
-          size_t offset = (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE
-              + ADPCM_BUF_COUNT_PER_SECT * ADPCMBUF_SIZE;
-          // offset += ADPCMBUF_SIZE;
-          // NVS_write(nvsHandle, offset, &fn, sizeof(fn), NVS_WRITE_POST_VERIFY);
-          NVS_write(nvsHandle, offset, &fn, sizeof(fn), 0);
-
-          incrementCounter();
-
-          wctx->currSect++;
-          wctx->prevIndexInSect = wctx->prevIndex;
-          wctx->prevSampleInSect = wctx->prevSample;
-        }
-
-        wctx->adpcmCount++;
-        wctx->adpcmCountInSect = wctx->adpcmCount % ADPCM_BUF_COUNT_PER_SECT;
-
-        if (wctx->adpcmCountInSect == 0)
-        {
-          NVS_erase(nvsHandle, (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE,
-                    SECT_SIZE);
-        }
-      } /* end of if ttt != NULL */
+          // last adpcm buf in sect
+          if (wctx->adpcmCountInSect == 0)
+          {
+            wctx->currPos++;
+            wctx->sectAdpcmState = wctx->adpcmState;
+            incrementCounter();
+            /* it is important to do this here */
+            NVS_erase(nvsHandle, (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE,
+                      SECT_SIZE);
+          }
+        } /* end of if ttt != NULL */
+      } /* end of if wctx */
     } /* end of AUDIO PCM EVENT */
 
     if (event & AUDIO_READ_EVT)
@@ -546,7 +553,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
       }
     }
 
-    if (loop > 50000)
+    if (loop > 5000)
     {
       while (1)
       {
@@ -558,20 +565,22 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
 static void startRecording(void)
 {
-  wctx = &writeContext;
-  memset(wctx, 0, sizeof(writeContext));
+  simpleProfileChar2 = 1;
 
+  wctx = &writeContext; // is here the right place? TODO
+
+  wctx->currStart = MONOTONIC_COUNTER;
+  wctx->currPos = wctx->currStart;
+  wctx->adpcmState.sample = 0;
+  wctx->adpcmState.index = 0;
+  wctx->adpcmState.dummy = 0;
+  wctx->sectAdpcmState = wctx->adpcmState;
   wctx->adpcmCount = 0;
   wctx->adpcmCountInSect = 0;
-  wctx->startSect = MONOTONIC_COUNTER;
-  wctx->currSect = wctx->startSect;
-  wctx->prevIndex = 0;
-  wctx->prevSample = 0;
-  wctx->prevIndexInSect = 0;
-  wctx->prevSampleInSect = 0;
+
   wctx->finished = false;
 
-  NVS_erase(nvsHandle, (wctx->currSect % DATA_SECT_COUNT) * SECT_SIZE,
+  NVS_erase(nvsHandle, (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE,
             SECT_SIZE);
 
   Task_sleep(10 * 1000 / Clock_tickPeriod);
@@ -663,7 +672,15 @@ static void stopRecording(void)
     I2S_stopClocks(i2sHandle);
     I2S_close(i2sHandle);
   }
+
+  for (int i = 0; i < NUM_PREV_STARTS; i++)
+  {
+    wctx->prevStarts[i] = wctx->prevStarts[i+1];
+  }
+  wctx->currStart = wctx->currPos;
   wctx->finished = true;
+
+  simpleProfileChar2 = 0;
 }
 
 static void errCallbackFxn(I2S_Handle handle, int_fast16_t status,
@@ -702,22 +719,10 @@ static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
 #if defined (LOG_ADPCM_DATA)
 static void uartReadCallbackFxn(UART_Handle handle, void *buf, size_t count)
 {
-  if (strcmp(buf, "start") == 0)
-  {
-
-  }
-  else if (strcmp(buf, "stop") == 0)
-  {
-
-  }
-  else
-  {
-  }
 }
 
 static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count)
 {
-  // uartTxReady = true;
   Semaphore_post(semUartTxReady);
 }
 #endif
@@ -955,41 +960,44 @@ static void incrementCounter(void)
   }
 }
 
-static void loadSegments(void)
+static void loadPrevStarts(void)
 {
-  uint32_t count = MONOTONIC_COUNTER;
-  if (count == 0)
-    return;
-
-  footnote_t fn = { };
-  size_t offset = (count - 1) % DATA_SECT_COUNT * SECT_SIZE
-      + ADPCM_SIZE_PER_SECT;
-  NVS_read(nvsHandle, offset, &fn, sizeof(fn));
-
-  uint8_t cka, ckb;
-  checksum(&fn, sizeof(fn) - 2, &cka, &ckb);
-  if (fn.cka == cka && fn.ckb == ckb && fn.segments[0] == count)
+  uint32_t counter = MONOTONIC_COUNTER;
+  if (counter == 0)
   {
-    memcpy(segments, &fn.segments, sizeof(segments));
-  }
-}
-
-static void updateSegments(void)
-{
-  if (segments[0] == (uint32_t) -1) // uninitialized
-  {
-    segments[1] = wctx->startSect;
-    segments[0] = wctx->currSect + 1;
+    for (int i = 0; i < NUM_PREV_STARTS; i++)
+    {
+      writeContext.prevStarts[i] = 0xFFFFFFFF;
+    }
   }
   else
   {
-    if (segments[0] == wctx->startSect)
-    {  // first sector
-      for (int i = SEGMENT_NUM; i > 0; i--)
-      {
-        segments[i] = segments[i - 1];
-      }
-    }
-    segments[0] = wctx->currSect + 1;
+    // skip earlist one
+    size_t offset = (counter - 1) % DATA_SECT_COUNT * SECT_SIZE + 4;
+    NVS_read(nvsHandle, offset, &writeContext,
+             sizeof(uint32_t) * NUM_PREV_STARTS);
   }
+
+  writeContext.currStart = counter;
+  writeContext.currPos = counter;
 }
+
+//static void updateSegments(void)
+//{
+//  if (segments[0] == (uint32_t) -1) // uninitialized
+//  {
+//    segments[1] = wctx->currStart;
+//    segments[0] = wctx->currPos + 1;
+//  }
+//  else
+//  {
+//    if (segments[0] == wctx->currStart)
+//    {  // first sector
+//      for (int i = SEGMENT_NUM; i > 0; i--)
+//      {
+//        segments[i] = segments[i - 1];
+//      }
+//    }
+//    segments[0] = wctx->currPos + 1;
+//  }
+//}
