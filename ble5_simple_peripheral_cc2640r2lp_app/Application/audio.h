@@ -27,22 +27,25 @@ _Static_assert(sizeof(AdpcmPacket_t)==244, "wrong adpcm packet size");
 
 typedef enum {
   RM_IDLE = 0,
-  RM_REQUESTED,
-  RM_PROCESSING_REQUEST,
-  RM_RESPONDED,
-  RM_PROCESSING_RESPONSE,
-} ReadStatus_t;
+  RM_REQUESTED,           // sent to audio
+  RM_PROCESSING_REQUEST,  // audio handling (unnecessary)
+  RM_RESPONDED,           // sent to SimplePeripheral
+  RM_PROCESSING_RESPONSE, // aka notifying.
+} ReadMessageStatus_t;
 
 typedef struct ReadMessage
 {
-  ReadStatus_t status;
-  int type;
-  uint32_t session;     // a unique number for identifying request session
-  uint32_t start;       // requested start sect
-  uint32_t major;       // sector
-  uint32_t minor;       // sub
+  ReadMessageStatus_t status;
+  int notiSession;        // notification session copied from context
+  int readSession;        // read session copied from context
+  int readType;           // defaults to 0, not used
+  int start;              // read start (sect)
+  int end;                // read end (sect)
+  int major;              // sector
+  int minor;              // sub
   uint8_t buf[256];
-  uint32_t readLen;
+  int readLen;
+  int error;              // used for return; stop reading if error
 } ReadMessage_t;
 
 extern ReadMessage_t readMessage; // singleton

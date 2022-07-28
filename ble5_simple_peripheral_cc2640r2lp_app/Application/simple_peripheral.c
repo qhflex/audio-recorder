@@ -3,7 +3,7 @@
  @file  simple_peripheral.c
 
  @brief This file contains the Simple Peripheral sample application for use
-        with the CC2650 Bluetooth Low Energy Protocol Stack.
+ with the CC2650 Bluetooth Low Energy Protocol Stack.
 
  Group: WCS, BTS
  Target Device: cc2640r2
@@ -18,15 +18,15 @@
  are met:
 
  *  Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
+ notice, this list of conditions and the following disclaimer.
 
  *  Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
+ notice, this list of conditions and the following disclaimer in the
+ documentation and/or other materials provided with the distribution.
 
  *  Neither the name of Texas Instruments Incorporated nor the names of
-    its contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
+ its contributors may be used to endorse or promote products derived
+ from this software without specific prior written permission.
 
  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
@@ -48,6 +48,10 @@
 /*********************************************************************
  * INCLUDES
  */
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <xdc/runtime/Types.h>
@@ -85,8 +89,8 @@
 #include "audio.h"
 #include "simple_peripheral.h"
 
-extern gattAttribute_t* simpleProfileChar1ValueAttrHandle;
-extern gattAttribute_t* simpleProfileChar1ConfigAttrHandle;
+extern gattAttribute_t *simpleProfileChar1ValueAttrHandle;
+extern gattAttribute_t *simpleProfileChar1ConfigAttrHandle;
 
 /*********************************************************************
  * MACROS
@@ -132,13 +136,13 @@ extern gattAttribute_t* simpleProfileChar1ConfigAttrHandle;
 #define SP_QUEUE_EVT                            Event_Id_30
 #define SP_SUBSCRIBE_EVT                        Event_Id_29
 #define SP_UNSUBSCRIBE_EVT                      Event_Id_28
-#define SP_SEEK_EVT                             Event_Id_27
+#define SP_READ_EVT                             Event_Id_27
 #define SP_HTIMER_EVT                           Event_Id_26
 #define SP_READDONE_EVT                         Event_Id_25
 
 // Bitwise OR of all RTOS events to pend on
 #define SP_ALL_EVENTS                           (SP_ICALL_EVT | SP_QUEUE_EVT | \
-                                                SP_SUBSCRIBE_EVT | SP_UNSUBSCRIBE_EVT | SP_SEEK_EVT |\
+                                                SP_SUBSCRIBE_EVT | SP_UNSUBSCRIBE_EVT | SP_READ_EVT |\
                                                 SP_HTIMER_EVT | SP_READDONE_EVT)
 
 // Size of string-converted device address ("0xXXXXXXXXXXXX")
@@ -150,10 +154,29 @@ extern gattAttribute_t* simpleProfileChar1ConfigAttrHandle;
 /*********************************************************************
  * TYPEDEFS
  */
+//typedef enum
+//{
+//  NOTI_OFF = 0, NOTI_ON,
+//} NotiStatus_t;
+typedef struct
+{
+  int start;
+  int end;
+} ReadRequest_t;
+
 typedef enum
 {
-  NOTI_OFF = 0, NOTI_ON,
-} NotiStatus_t;
+  SS_PENDING, SS_READING, SS_NOTIFYING
+} NotiSubstate_t;
+
+typedef struct NotiContext
+{
+  int notiSession;
+  int readSession;        // readSession == 0 means no read request arrived yet
+  int start;
+  int end;
+  NotiSubstate_t subState;
+} NotiContext_t;
 
 /*********************************************************************
  * GLOBAL VARIABLES
@@ -168,7 +191,7 @@ Task_Struct spTask;
 #endif
 uint8_t spTaskStack[SP_TASK_STACK_SIZE];
 
-ReadMessage_t readMessage;
+ReadMessage_t readMessage = { };
 
 /*********************************************************************
  * LOCAL VARIABLES
@@ -188,55 +211,35 @@ static uint16_t connList[MAX_NUM_BLE_CONNS];
 static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "Simple Peripheral";
 
 // Advertisement data
-static uint8_t advertData[] =
-{
-  0x02,   // length of this data
-  GAP_ADTYPE_FLAGS,
-  DEFAULT_DISCOVERABLE_MODE | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
+static uint8_t advertData[] = { 0x02,   // length of this data
+    GAP_ADTYPE_FLAGS,
+    DEFAULT_DISCOVERABLE_MODE | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
 
-  // service UUID, to notify central devices what services are included
-  // in this peripheral
-  0x11,   // length of this data
-  GAP_ADTYPE_128BIT_COMPLETE,      // some of the UUID's, but not all
-  SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_SERV_UUID)
-};
+    // service UUID, to notify central devices what services are included
+    // in this peripheral
+    0x11,// length of this data
+    GAP_ADTYPE_128BIT_COMPLETE,      // some of the UUID's, but not all
+    SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_SERV_UUID) };
 
 // Scan Response Data
-static uint8_t scanRspData[] =
-{
-  // complete name
-  17,   // length of this data
-  GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-  'S',
-  'i',
-  'm',
-  'p',
-  'l',
-  'e',
-  'P',
-  'e',
-  'r',
-  'i',
-  'p',
-  'h',
-  'e',
-  'r',
-  'a',
-  'l',
+static uint8_t scanRspData[] = {
+    // complete name
+    17,// length of this data
+    GAP_ADTYPE_LOCAL_NAME_COMPLETE, 'S', 'i', 'm', 'p', 'l', 'e', 'P', 'e', 'r',
+    'i', 'p', 'h', 'e', 'r', 'a', 'l',
 
-  // connection interval range
-  5,   // length of this data
-  GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE,
-  LO_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL),   // 100ms
-  HI_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL),
-  LO_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL),   // 1s
-  HI_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL),
+    // connection interval range
+    5,// length of this data
+    GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE, LO_UINT16(
+        DEFAULT_DESIRED_MIN_CONN_INTERVAL),   // 100ms
+    HI_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL), LO_UINT16(
+        DEFAULT_DESIRED_MAX_CONN_INTERVAL),   // 1s
+    HI_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL),
 
-  // Tx power level
-  2,   // length of this data
-  GAP_ADTYPE_POWER_LEVEL,
-  0       // 0dBm
-};
+    // Tx power level
+    2,// length of this data
+    GAP_ADTYPE_POWER_LEVEL, 0       // 0dBm
+    };
 
 // Advertising handles
 static uint8 advHandleLegacy;
@@ -244,35 +247,55 @@ static uint8 advHandleLegacy;
 // Address mode
 static GAP_Addr_Modes_t addrMode = DEFAULT_ADDRESS_MODE;
 
-NotiStatus_t notiStatus = NOTI_OFF;
+static int notiSessionCounter = 0;
 
-static uint32_t seekSession = 0;
-static uint32_t seekSectRequested = (uint32_t)-1;
+static NotiContext_t notiContext;
+static NotiContext_t *nctx = NULL;
+
+static ReadRequest_t rr = { };
+static Semaphore_Handle semReadReq;
 
 static GPTimerCC26XX_Handle hTimer;
 
-void timerCallback(GPTimerCC26XX_Handle handle, GPTimerCC26XX_IntMask interruptMask) {
-  if (readMessage.status == RM_PROCESSING_RESPONSE)
-  {
-    Event_post(syncEvent, SP_HTIMER_EVT);
-  }
+void timerCallback(GPTimerCC26XX_Handle handle,
+                   GPTimerCC26XX_IntMask interruptMask)
+{
+  Event_post(syncEvent, SP_HTIMER_EVT);
 }
 
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
 
-static void SimplePeripheral_init( void );
+static void SimplePeripheral_init(void);
 static void SimplePeripheral_taskFxn(UArg a0, UArg a1);
 static uint8_t SimplePeripheral_processStackMsg(ICall_Hdr *pMsg);
 static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg);
 static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg);
-static void SimplePeripheral_advCallback(uint32_t event, void *pBuf, uintptr_t arg);
+static void SimplePeripheral_advCallback(uint32_t event, void *pBuf,
+                                         uintptr_t arg);
 static uint8_t SimplePeripheral_addConn(uint16_t connHandle);
 static uint8_t SimplePeripheral_getConnIndex(uint16_t connHandle);
 static uint8_t SimplePeripheral_removeConn(uint16_t connHandle);
 static uint8_t SimplePeripheral_clearConnListEntry(uint16_t connHandle);
-static void SimplePeripheral_tryNotify(void);
+
+static void SimplePeripheral_startTimer(void);
+static void SimplePeripheral_stopTimer(void);
+static bool SimplePeripheral_isLastMessage(void);
+static void SimplePeripheral_doNotify(void);
+
+static void SimplePeripheral_onSubscribe(void);
+static void SimplePeripheral_onUnsubscribe(void);
+static void SimplePeripheral_onRead(void);
+static void SimplePeripheral_onReadDone(void);
+static void SimplePeripheral_onTimer(void);
+
+static void SimplePeripheral_enterPending(void);
+static void SimplePeripheral_exitPending(void);
+static void SimplePeripheral_enterReading(void);
+static void SimplePeripheral_exitReading(void);
+static void SimplePeripheral_enterNotifying(void);
+static void SimplePeripheral_exitNotifying(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -298,7 +321,7 @@ static void simple_peripheral_spin(void)
 {
   volatile uint8_t x = 0;
 
-  while(1)
+  while (1)
   {
     x++;
   }
@@ -332,10 +355,11 @@ void SimplePeripheral_unsubscribe(void)
   Event_post(syncEvent, SP_UNSUBSCRIBE_EVT);
 }
 
-void SimplePeripheral_seek(uint32_t sect)
+void SimplePeripheral_read(int start, int end)
 {
-  seekSectRequested = sect;
-  Event_post(syncEvent, SP_SEEK_EVT);
+  rr.start = start;
+  rr.end = end;
+  Event_post(syncEvent, SP_READ_EVT);
 }
 
 void Audio_readDone()
@@ -379,7 +403,7 @@ static void SimplePeripheral_init(void)
   }
 
   // Initialize GATT attributes
-  GGS_AddService(GATT_ALL_SERVICES);           // GAP GATT Service
+  GGS_AddService(GATT_ALL_SERVICES);// GAP GATT Service
   GATTServApp_AddService(GATT_ALL_SERVICES);   // GATT Service
   SimpleProfile_AddService(GATT_ALL_SERVICES); // Simple GATT Profile
 
@@ -396,13 +420,14 @@ static void SimplePeripheral_init(void)
   {
     // Set initial values to maximum, RX is set to max. by default(251 octets, 2120us)
     // Some brand smartphone is essentially needing 251/2120, so we set them here.
-    #define APP_SUGGESTED_PDU_SIZE 251 //default is 27 octets(TX)
-    #define APP_SUGGESTED_TX_TIME 2120 //default is 328us(TX)
+#define APP_SUGGESTED_PDU_SIZE 251 //default is 27 octets(TX)
+#define APP_SUGGESTED_TX_TIME 2120 //default is 328us(TX)
 
     // This API is documented in hci.h
     // See the LE Data Length Extension section in the BLE5-Stack User's Guide for information on using this command:
     // http://software-dl.ti.com/lprf/ble5stack-latest/
-    HCI_LE_WriteSuggestedDefaultDataLenCmd(APP_SUGGESTED_PDU_SIZE, APP_SUGGESTED_TX_TIME);
+    HCI_LE_WriteSuggestedDefaultDataLenCmd(APP_SUGGESTED_PDU_SIZE,
+                                           APP_SUGGESTED_TX_TIME);
   }
 
   // Initialize GATT Client
@@ -414,16 +439,23 @@ static void SimplePeripheral_init(void)
   //Initialize GAP layer for Peripheral role and register to receive GAP events
   GAP_DeviceInit(GAP_PROFILE_PERIPHERAL, selfEntity, addrMode, NULL);
 
+  // Initialize GPTimer
   GPTimerCC26XX_Params params;
   GPTimerCC26XX_Params_init(&params);
-  params.width          = GPT_CONFIG_16BIT;
-  params.mode           = GPT_MODE_PERIODIC;
-  params.direction      = GPTimerCC26XX_DIRECTION_UP;
+  params.width = GPT_CONFIG_16BIT;
+  params.mode = GPT_MODE_PERIODIC;
+  params.direction = GPTimerCC26XX_DIRECTION_UP;
   params.debugStallMode = GPTimerCC26XX_DEBUG_STALL_OFF;
   hTimer = GPTimerCC26XX_open(Board_GPTIMER0A, &params); // Board_GPTIMER0A
 
+  // Initialize rr lock
+  Semaphore_Params semParams;
+  Semaphore_Params_init(&semParams);
+  semParams.mode = Semaphore_Mode_BINARY;
+  semReadReq = Semaphore_create(1, &semParams, Error_IGNORE);
+
+  // Initialize message status
   readMessage.status = RM_IDLE;
-  readMessage.session = seekSession;
 }
 
 /*********************************************************************
@@ -447,7 +479,7 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
     // Note that an event associated with a thread is posted when a
     // message is queued to the message receive queue of the thread
     events = Event_pend(syncEvent, Event_Id_NONE, SP_ALL_EVENTS,
-                        ICALL_TIMEOUT_FOREVER);
+    ICALL_TIMEOUT_FOREVER);
 
     if (events)
     {
@@ -457,19 +489,19 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 
       // Fetch any available messages that might have been sent from the stack
       if (ICall_fetchServiceMsg(&src, &dest,
-                                (void **)&pMsg) == ICALL_ERRNO_SUCCESS)
+                                (void**) &pMsg) == ICALL_ERRNO_SUCCESS)
       {
         uint8 safeToDealloc = TRUE;
 
         if ((src == ICALL_SERVICE_CLASS_BLE) && (dest == selfEntity))
         {
-          ICall_Stack_Event *pEvt = (ICall_Stack_Event *)pMsg;
+          ICall_Stack_Event *pEvt = (ICall_Stack_Event*) pMsg;
 
           // Check for BLE stack events first
           if (pEvt->signature != 0xffff)
           {
             // Process inter-task message
-            safeToDealloc = SimplePeripheral_processStackMsg((ICall_Hdr *)pMsg);
+            safeToDealloc = SimplePeripheral_processStackMsg((ICall_Hdr*) pMsg);
           }
         }
 
@@ -479,73 +511,32 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         }
       }
 
-      if (events & SP_SUBSCRIBE_EVT)
+      if (events & SP_SUBSCRIBE_EVT && events & SP_UNSUBSCRIBE_EVT)
       {
-        Types_FreqHz  freq;
-        BIOS_getCpuFreq(&freq);
-        // GPTimerCC26XX_Value loadVal = freq.lo / 1000 - 1; //47999
-        GPTimerCC26XX_Value loadVal = freq.lo - 1;
-        GPTimerCC26XX_setLoadValue(hTimer, loadVal);
-        GPTimerCC26XX_registerInterrupt(hTimer, timerCallback, GPT_INT_TIMEOUT);
-        GPTimerCC26XX_start(hTimer);
-
-        notiStatus = NOTI_ON;
+        // TODO
+      }
+      else if (events & SP_SUBSCRIBE_EVT)
+      {
+        SimplePeripheral_onSubscribe();
+      }
+      else if (events & SP_UNSUBSCRIBE_EVT)
+      {
+        SimplePeripheral_onUnsubscribe();
       }
 
-      if (events & SP_UNSUBSCRIBE_EVT)
+      if (events & SP_READ_EVT)
       {
-        GPTimerCC26XX_stop(hTimer);
-        notiStatus = NOTI_OFF;
+        SimplePeripheral_onRead();
       }
 
-      if (events & SP_SEEK_EVT)
+      if (events & SP_READDONE_EVT)
       {
-        if (notiStatus == NOTI_ON)
-        {
-          if (readMessage.status == RM_IDLE)
-          {
-            readMessage.session = seekSession;
-            readMessage.start = seekSectRequested;
-            readMessage.major = readMessage.start;
-            readMessage.minor = 0;
-            Audio_read();
-          }
-        }
-        else
-        {
-          seekSession = readMessage.session;
-        }
-      }
-
-      if (events & SP_READDONE_EVT && readMessage.status == RM_RESPONDED)
-      {
-        if (notiStatus == NOTI_OFF)
-        {
-          readMessage.status = RM_IDLE;
-        }
-        else
-        {
-          if (seekSession != readMessage.session)
-          {
-            readMessage.session = seekSession;
-            readMessage.start = seekSectRequested;
-            readMessage.major = readMessage.start;
-            readMessage.minor = 0;
-            Audio_read();
-          }
-          else
-          {
-            SimplePeripheral_tryNotify();
-          }
-        }
+        SimplePeripheral_onReadDone();
       }
 
       if (events & SP_HTIMER_EVT)
       {
-        if (notiStatus == NOTI_ON && readMessage.status == RM_PROCESSING_RESPONSE)
-        {
-          SimplePeripheral_tryNotify();
-        }
+        SimplePeripheral_onTimer();
       }
     }
   }
@@ -567,45 +558,45 @@ static uint8_t SimplePeripheral_processStackMsg(ICall_Hdr *pMsg)
 
   switch (pMsg->event)
   {
-    case GAP_MSG_EVENT:
-      SimplePeripheral_processGapMessage((gapEventHdr_t*) pMsg);
-      break;
+  case GAP_MSG_EVENT:
+    SimplePeripheral_processGapMessage((gapEventHdr_t*) pMsg);
+    break;
 
-    case GATT_MSG_EVENT:
-      // Process GATT message
-      safeToDealloc = SimplePeripheral_processGATTMsg((gattMsgEvent_t *)pMsg);
-      break;
+  case GATT_MSG_EVENT:
+    // Process GATT message
+    safeToDealloc = SimplePeripheral_processGATTMsg((gattMsgEvent_t*) pMsg);
+    break;
 
-    case HCI_GAP_EVENT_EVENT:
+  case HCI_GAP_EVENT_EVENT:
+  {
+    // Process HCI message
+    switch (pMsg->status)
     {
-      // Process HCI message
-      switch(pMsg->status)
-      {
-        case HCI_COMMAND_COMPLETE_EVENT_CODE:
-          break;
+    case HCI_COMMAND_COMPLETE_EVENT_CODE:
+      break;
 
-        case HCI_BLE_HARDWARE_ERROR_EVENT_CODE:
-          AssertHandler(HAL_ASSERT_CAUSE_HARDWARE_ERROR,0);
-          break;
+    case HCI_BLE_HARDWARE_ERROR_EVENT_CODE:
+      AssertHandler(HAL_ASSERT_CAUSE_HARDWARE_ERROR, 0);
+      break;
 
-        // HCI Commands Events
-        case HCI_COMMAND_STATUS_EVENT_CODE:
-          break;
+      // HCI Commands Events
+    case HCI_COMMAND_STATUS_EVENT_CODE:
+      break;
 
-        // LE Events
-        case HCI_LE_EVENT_CODE:
-          break;
+      // LE Events
+    case HCI_LE_EVENT_CODE:
+      break;
 
-        default:
-          break;
-      }
-
+    default:
       break;
     }
 
-    default:
-      // do nothing
-      break;
+    break;
+  }
+
+  default:
+    // do nothing
+    break;
   }
 
   return (safeToDealloc);
@@ -642,88 +633,89 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg)
  */
 static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg)
 {
-  switch(pMsg->opcode)
+  switch (pMsg->opcode)
   {
-    case GAP_DEVICE_INIT_DONE_EVENT:
+  case GAP_DEVICE_INIT_DONE_EVENT:
+  {
+    bStatus_t status = FAILURE;
+
+    gapDeviceInitDoneEvent_t *pPkt = (gapDeviceInitDoneEvent_t*) pMsg;
+
+    if (pPkt->hdr.status == SUCCESS)
     {
-      bStatus_t status = FAILURE;
+      // Temporary memory for advertising parameters for set #1. These will be copied
+      // by the GapAdv module
+      GapAdv_params_t advParamLegacy = GAPADV_PARAMS_LEGACY_SCANN_CONN;
 
-      gapDeviceInitDoneEvent_t *pPkt = (gapDeviceInitDoneEvent_t *)pMsg;
+      // Create Advertisement set #1 and assign handle
+      status = GapAdv_create(&SimplePeripheral_advCallback, &advParamLegacy,
+                             &advHandleLegacy);
+      SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
 
-      if(pPkt->hdr.status == SUCCESS)
-      {
-        // Temporary memory for advertising parameters for set #1. These will be copied
-        // by the GapAdv module
-        GapAdv_params_t advParamLegacy = GAPADV_PARAMS_LEGACY_SCANN_CONN;
+      // Load advertising data for set #1 that is statically allocated by the app
+      status = GapAdv_loadByHandle(advHandleLegacy, GAP_ADV_DATA_TYPE_ADV,
+                                   sizeof(advertData), advertData);
+      SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
 
-        // Create Advertisement set #1 and assign handle
-        status = GapAdv_create(&SimplePeripheral_advCallback, &advParamLegacy,
-                               &advHandleLegacy);
-        SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
+      // Load scan response data for set #1 that is statically allocated by the app
+      status = GapAdv_loadByHandle(advHandleLegacy, GAP_ADV_DATA_TYPE_SCAN_RSP,
+                                   sizeof(scanRspData), scanRspData);
+      SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
 
-        // Load advertising data for set #1 that is statically allocated by the app
-        status = GapAdv_loadByHandle(advHandleLegacy, GAP_ADV_DATA_TYPE_ADV,
-                                     sizeof(advertData), advertData);
-        SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
+      // Set event mask for set #1
+      status = GapAdv_setEventMask(
+          advHandleLegacy,
+          GAP_ADV_EVT_MASK_START_AFTER_ENABLE
+              | GAP_ADV_EVT_MASK_END_AFTER_DISABLE
+              | GAP_ADV_EVT_MASK_SET_TERMINATED);
 
-        // Load scan response data for set #1 that is statically allocated by the app
-        status = GapAdv_loadByHandle(advHandleLegacy, GAP_ADV_DATA_TYPE_SCAN_RSP,
-                                     sizeof(scanRspData), scanRspData);
-        SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
-
-        // Set event mask for set #1
-        status = GapAdv_setEventMask(advHandleLegacy,
-                                     GAP_ADV_EVT_MASK_START_AFTER_ENABLE |
-                                     GAP_ADV_EVT_MASK_END_AFTER_DISABLE |
-                                     GAP_ADV_EVT_MASK_SET_TERMINATED);
-
-        // Enable legacy advertising for set #1
-        status = GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX , 0);
-        SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
-      }
-
-      break;
+      // Enable legacy advertising for set #1
+      status = GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX,
+                             0);
+      SIMPLEPERIPHERAL_ASSERT(status == SUCCESS);
     }
 
-    case GAP_LINK_ESTABLISHED_EVENT:
+    break;
+  }
+
+  case GAP_LINK_ESTABLISHED_EVENT:
+  {
+    gapEstLinkReqEvent_t *pPkt = (gapEstLinkReqEvent_t*) pMsg;
+
+    // Display the amount of current connections
+    uint8_t numActive = linkDB_NumActive();
+
+    if (pPkt->hdr.status == SUCCESS)
     {
-      gapEstLinkReqEvent_t *pPkt = (gapEstLinkReqEvent_t *)pMsg;
-
-      // Display the amount of current connections
-      uint8_t numActive = linkDB_NumActive();
-
-      if (pPkt->hdr.status == SUCCESS)
-      {
-        // Add connection to list and start RSSI
-        SimplePeripheral_addConn(pPkt->connectionHandle);
-      }
-
-      if (numActive < MAX_NUM_BLE_CONNS)
-      {
-        // Start advertising since there is room for more connections
-        GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX , 0);
-      }
-
-      break;
+      // Add connection to list and start RSSI
+      SimplePeripheral_addConn(pPkt->connectionHandle);
     }
 
-    case GAP_LINK_TERMINATED_EVENT:
+    if (numActive < MAX_NUM_BLE_CONNS)
     {
-      gapTerminateLinkEvent_t *pPkt = (gapTerminateLinkEvent_t *)pMsg;
-
-      // Remove the connection from the list and disable RSSI if needed
-      SimplePeripheral_removeConn(pPkt->connectionHandle);
-
       // Start advertising since there is room for more connections
-      GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX , 0);
-
-      notiStatus = NOTI_OFF;
-      // GPTimerCC26XX_stop(hTimer);
-      break;
+      GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
     }
 
-    default:
-      break;
+    break;
+  }
+
+  case GAP_LINK_TERMINATED_EVENT:
+  {
+    gapTerminateLinkEvent_t *pPkt = (gapTerminateLinkEvent_t*) pMsg;
+
+    // Remove the connection from the list and disable RSSI if needed
+    SimplePeripheral_removeConn(pPkt->connectionHandle);
+
+    // Start advertising since there is room for more connections
+    GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+
+    SimplePeripheral_onUnsubscribe();
+    break;
+  }
+
+  default:
+    break;
   }
 }
 
@@ -734,7 +726,8 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg)
  *
  * @param   pMsg - message to process
  */
-static void SimplePeripheral_advCallback(uint32_t event, void *pBuf, uintptr_t arg)
+static void SimplePeripheral_advCallback(uint32_t event, void *pBuf,
+                                         uintptr_t arg)
 {
   if (event != GAP_EVT_INSUFFICIENT_MEMORY)
   {
@@ -790,7 +783,7 @@ static uint8_t SimplePeripheral_getConnIndex(uint16_t connHandle)
     }
   }
 
-  return(MAX_NUM_BLE_CONNS);
+  return (MAX_NUM_BLE_CONNS);
 }
 
 /*********************************************************************
@@ -807,26 +800,26 @@ static uint8_t SimplePeripheral_clearConnListEntry(uint16_t connHandle)
   // Set to invalid connection index initially
   uint8_t connIndex = MAX_NUM_BLE_CONNS;
 
-  if(connHandle != CONNHANDLE_ALL)
+  if (connHandle != CONNHANDLE_ALL)
   {
     // Get connection index from handle
     connIndex = SimplePeripheral_getConnIndex(connHandle);
-    if(connIndex >= MAX_NUM_BLE_CONNS)
-	{
-	  return(bleInvalidRange);
-	}
+    if (connIndex >= MAX_NUM_BLE_CONNS)
+    {
+      return (bleInvalidRange);
+    }
   }
 
   // Clear specific handle or all handles
-  for(i = 0; i < MAX_NUM_BLE_CONNS; i++)
+  for (i = 0; i < MAX_NUM_BLE_CONNS; i++)
   {
-    if((connIndex == i) || (connHandle == CONNHANDLE_ALL))
+    if ((connIndex == i) || (connHandle == CONNHANDLE_ALL))
     {
       connList[i] = CONNHANDLE_INVALID;
     }
   }
 
-  return(SUCCESS);
+  return (SUCCESS);
 }
 
 /*********************************************************************
@@ -842,7 +835,7 @@ static uint8_t SimplePeripheral_removeConn(uint16_t connHandle)
 {
   uint8_t connIndex = SimplePeripheral_getConnIndex(connHandle);
 
-  if(connIndex != MAX_NUM_BLE_CONNS)
+  if (connIndex != MAX_NUM_BLE_CONNS)
   {
     // Clear Connection List Entry
     SimplePeripheral_clearConnListEntry(connHandle);
@@ -851,7 +844,33 @@ static uint8_t SimplePeripheral_removeConn(uint16_t connHandle)
   return connIndex;
 }
 
-static void SimplePeripheral_tryNotify(void)
+static void SimplePeripheral_startTimer(void)
+{
+  Types_FreqHz freq;
+  BIOS_getCpuFreq(&freq);
+  // GPTimerCC26XX_Value loadVal = freq.lo / 1000 - 1; //47999
+  GPTimerCC26XX_Value loadVal = freq.lo - 1;
+  GPTimerCC26XX_setLoadValue(hTimer, loadVal);
+  GPTimerCC26XX_registerInterrupt(hTimer, timerCallback, GPT_INT_TIMEOUT);
+  GPTimerCC26XX_start(hTimer);
+}
+
+static void SimplePeripheral_stopTimer(void)
+{
+  GPTimerCC26XX_stop(hTimer);
+}
+
+static bool SimplePeripheral_isLastMessage(void)
+{
+  if (readMessage.minor == 16 && readMessage.major + 1 == nctx->end)
+    return true;
+  if (readMessage.readLen == 2 && readMessage.buf[0] == 0xee
+      && readMessage.buf[1] == 0x0f)
+    return true;
+  return false;
+}
+
+static void SimplePeripheral_doNotify(void)
 {
   attHandleValueNoti_t noti;
   bStatus_t status;
@@ -871,21 +890,191 @@ static void SimplePeripheral_tryNotify(void)
    * If mtu is not requested to be 251, we got 0x1B.
    * #define  bleInvalidMtuSize   0x1B
    */
-  if (status == SUCCESS)
-  {
-    readMessage.minor++;
-    if (readMessage.minor == 17) {
-      readMessage.major++;
-      readMessage.minor = 0;
-    }
-
-    Audio_read();
-  }
-  else
+  if (status != SUCCESS)
   {
     GATT_bm_free((gattMsg_t*) &noti, ATT_HANDLE_VALUE_NOTI);
+    return;
+  }
+
+  if (SimplePeripheral_isLastMessage())
+  {
+    SimplePeripheral_exitNotifying();
+    readMessage.status = RM_IDLE;
+    nctx->subState = SS_PENDING;
+    SimplePeripheral_enterPending();
   }
 }
 
+static void SimplePeripheral_onSubscribe(void)
+{
+  nctx = &notiContext;
+  memset(nctx, 0, sizeof(*nctx));
+  nctx->notiSession = notiSessionCounter++;
+  nctx->readSession = 0;
+  nctx->subState = SS_PENDING;
+  SimplePeripheral_enterPending();
+}
+
+static void SimplePeripheral_onUnsubscribe(void)
+{
+  if (!nctx)
+    return;
+
+  switch (nctx->subState)
+  {
+  case SS_PENDING:
+    // if message owned in this state, the status should be RM_IDLE already
+    // if not owned, the message status should not be modified
+    SimplePeripheral_exitPending();
+    break;
+  case SS_READING:
+    // message not owned
+    SimplePeripheral_exitReading();
+    break;
+  case SS_NOTIFYING:
+    SimplePeripheral_exitNotifying();
+    // message owned
+    readMessage.status = RM_IDLE;
+    break;
+  }
+  nctx = NULL;
+}
+
+static void SimplePeripheral_onRead(void)
+{
+  int start, end;
+
+  if (!nctx)
+    return;
+
+  Semaphore_pend(semReadReq, BIOS_WAIT_FOREVER);
+  start = rr.start;
+  end = rr.end;
+  Semaphore_post(semReadReq);
+
+  // update readSession anyway
+  nctx->readSession++;
+  nctx->start = start;
+  nctx->end = end;
+
+  switch (nctx->subState)
+  {
+  case SS_PENDING:
+    if (readMessage.status == RM_IDLE) // goto SS_READING
+    {
+      SimplePeripheral_exitPending();
+      nctx->subState = SS_READING;
+      SimplePeripheral_enterReading();
+    }
+    break;
+
+  case SS_NOTIFYING:
+    SimplePeripheral_exitNotifying();
+    nctx->subState = SS_READING;
+    SimplePeripheral_enterReading();
+    break;
+
+  default:
+    break;
+  }
+}
+
+static void SimplePeripheral_onReadDone(void)
+{
+  if (!nctx)
+  {
+    readMessage.status = RM_IDLE;
+    return;
+  }
+
+  switch (nctx->subState)
+  {
+  case SS_PENDING:              // the response is tooooo outdated, really.
+    // TODO
+    break;
+
+  case SS_READING:
+    if (readMessage.notiSession == nctx->notiSession
+        && readMessage.readSession == nctx->readSession)
+    {
+      SimplePeripheral_exitReading();
+      nctx->subState = SS_NOTIFYING;
+      SimplePeripheral_enterNotifying();
+    }
+    else
+    {
+      // re-entering
+      SimplePeripheral_exitReading();
+      nctx->subState = SS_READING;
+      SimplePeripheral_enterReading();
+    }
+    break;
+
+  case SS_NOTIFYING:
+    // TODO spin?
+    break;
+  }
+}
+
+static void SimplePeripheral_onTimer(void)
+{
+  if (nctx && nctx->subState == SS_NOTIFYING)
+  {
+    SimplePeripheral_doNotify();
+  }
+}
+
+static void SimplePeripheral_enterPending(void)
+{
+  // nothing to do
+}
+
+static void SimplePeripheral_exitPending(void)
+{
+  // nothing to do
+}
+
+static void SimplePeripheral_enterReading(void)
+{
+  if (readMessage.notiSession == nctx->notiSession
+      && readMessage.readSession == nctx->readSession)
+  {
+    readMessage.minor++;
+    if (readMessage.minor == 16)
+    {
+      readMessage.minor = 0;
+      readMessage.major++;
+    }
+  }
+  else
+  {
+    readMessage.notiSession = nctx->notiSession;
+    readMessage.readSession = nctx->readSession;
+    readMessage.start = nctx->start;
+    readMessage.end = nctx->end;
+    readMessage.readType = 0;
+    readMessage.major = nctx->start;
+    readMessage.minor = 0;
+  }
+
+  Audio_read();
+}
+
+static void SimplePeripheral_exitReading(void)
+{
+  // nothing to do
+}
+
+static void SimplePeripheral_enterNotifying(void)
+{
+  SimplePeripheral_startTimer();
+  SimplePeripheral_doNotify();
+}
+
+static void SimplePeripheral_exitNotifying(void)
+{
+  SimplePeripheral_stopTimer();
+}
+
 /*********************************************************************
-*********************************************************************/
+ *********************************************************************/

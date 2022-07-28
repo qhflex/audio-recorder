@@ -505,10 +505,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
     if (event & AUDIO_READ_EVT)
     {
       readMessage.status = RM_PROCESSING_REQUEST;
-    }
 
-    if (readMessage.status == RM_PROCESSING_REQUEST)
-    {
       uint32_t counter = MONOTONIC_COUNTER;
       if (counter >= DATA_SECT_COUNT && readMessage.major <= counter - DATA_SECT_COUNT)
       {
