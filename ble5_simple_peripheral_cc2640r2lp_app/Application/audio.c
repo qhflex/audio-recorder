@@ -40,7 +40,6 @@
 
 #include "audio.h"
 
-
 /*********************************************************************
  *
  * How data stored
@@ -116,6 +115,8 @@
 
 #define SECT_OFFSET(index)                (index * SECT_SIZE)
 
+#define MAX_RECORDING_SECTORS             30
+
 /*
  * monotonic counter is used to record sectors used.
  */
@@ -170,7 +171,8 @@ typedef struct WriteContext
   bool finished;
 } WriteContext_t;
 
-_Static_assert(offsetof(WriteContext_t, pcmBuf)==256, "wrong write context (header) size");
+_Static_assert(offsetof(WriteContext_t, pcmBuf)==256,
+               "wrong write context (header) size");
 
 #ifdef LOG_ADPCM_DATA
 typedef struct __attribute__ ((__packed__)) UartPacket
@@ -308,7 +310,6 @@ static void loadCounter(void);
 static void incrementCounter(void);
 
 static void loadPrevStarts(void);
-// static void updateSegments(void);
 
 static void startRecording(void);
 static void stopRecording(void);
@@ -389,20 +390,24 @@ static void Audio_init(void)
 }
 
 /*********************************************************************
- * @fn      I2sMic_taskFxn
+ * @fn      Audio_taskFxn
  *
- * @brief   Application task entry point for the I2s Mic.
+ * @brief   Application task entry point for the Audio task.
  *
  * @param   a0, a1 - not used.
  */
 static void Audio_taskFxn(UArg a0, UArg a1)
 {
+
   Types_FreqHz freq;
   Timestamp_getFreq(&freq);
 
   Audio_init();
+
   loadCounter();
+
   loadPrevStarts();
+
   Event_post(audioEvent, AUDIO_START_REC);
 
   for (int loop = 0;; loop++)
@@ -422,21 +427,18 @@ static void Audio_taskFxn(UArg a0, UArg a1)
     if (event & AUDIO_PCM_EVT)
     {
       Semaphore_pend(semDataReadyForTreatment, BIOS_NO_WAIT);
-
       if (!wctx->finished)
       {
-        I2S_Transaction *ttt = (I2S_Transaction*) List_get(&wctx->processingList);
+        I2S_Transaction *ttt = (I2S_Transaction*) List_get(
+            &wctx->processingList);
         if (ttt != NULL)
         {
-
-  #ifdef LOG_ADPCM_DATA
+#ifdef LOG_ADPCM_DATA
           /* save a copy */
           int16_t uartPrevSample = wctx->adpcmState.sample;
           uint8_t uartPrevIndex = wctx->adpcmState.index;
-  #endif
-
+#endif
           uint16_t adpcmInUse = wctx->adpcmCount % ADPCMBUF_NUM;
-
           int16_t *samples = (int16_t*) ttt->bufPtr;
           for (int i = 0; i < PCM_SAMPLES_PER_BUF; i++)
           {
@@ -451,44 +453,44 @@ static void Audio_taskFxn(UArg a0, UArg a1)
               wctx->adpcmBuf[adpcmInUse][i / 2] |= (code << 4);
             }
           }
-
-  #ifdef LOG_ADPCM_DATA
+#ifdef LOG_ADPCM_DATA
           Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);
           uartPkt.preamble = PREAMBLE;
           uartPkt.startSect = wctx->currStart;
           uartPkt.index = wctx->adpcmCount;
           uartPkt.prevSample = uartPrevSample;
           uartPkt.prevIndex = uartPrevIndex;
-  #ifdef LOG_PCM_DATA
+#ifdef LOG_PCM_DATA
           uartPkt.dummy = 1;
           memcpy(uartPkt.pcm, ttt->bufPtr, PCMBUF_SIZE);
-  #else
+#else
           uartPkt.dummy = 0;
-  #endif
+#endif
           memcpy(uartPkt.adpcm, wctx->adpcmBuf[adpcmInUse], ADPCMBUF_SIZE);
           checksum(&uartPkt.startSect,
           offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect),
                    &uartPkt.cka, &uartPkt.ckb);
           UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
-  #endif
-
+#endif
           List_put(&wctx->recordingList, (List_Elem*) ttt);
-
           if (adpcmInUse == ADPCMBUF_NUM - 1)
           {
             if (wctx->adpcmCountInSect == adpcmInUse)
             {
               // uint32_t bufCount = 0;
               size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE;
-              NVS_write(nvsHandle, offset, wctx, 96 + ADPCMBUF_SIZE * ADPCMBUF_NUM, 0);
+              NVS_write(nvsHandle, offset, wctx,
+                        96 + ADPCMBUF_SIZE * ADPCMBUF_NUM, 0);
             }
             else
             {
-              uint32_t writtenBufCount = wctx->adpcmCountInSect % ADPCMBUF_NUM * ADPCMBUF_NUM;
-              size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE
-                  + 96 + writtenBufCount * ADPCMBUF_SIZE;
+              uint32_t writtenBufCount = wctx->adpcmCountInSect % ADPCMBUF_NUM
+                  * ADPCMBUF_NUM;
+              size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE + 96
+                  + writtenBufCount * ADPCMBUF_SIZE;
               NVS_write(nvsHandle, offset, &wctx->adpcmBuf[0],
-                        ADPCMBUF_SIZE * ADPCMBUF_NUM, 0); // NVS_WRITE_POST_VERIFY);
+              ADPCMBUF_SIZE * ADPCMBUF_NUM,
+                        0); // NVS_WRITE_POST_VERIFY);
             }
           }
 
@@ -504,6 +506,11 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             /* it is important to do this here */
             NVS_erase(nvsHandle, (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE,
                       SECT_SIZE);
+
+            if (wctx->currPos - wctx->currStart == MAX_RECORDING_SECTORS)
+            {
+              stopRecording();
+            }
           }
         } /* end of if ttt != NULL */
       } /* end of if wctx */
@@ -514,7 +521,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
       readMessage.status = RM_PROCESSING_REQUEST;
 
       uint32_t counter = MONOTONIC_COUNTER;
-      if (counter >= DATA_SECT_COUNT && readMessage.major <= counter - DATA_SECT_COUNT)
+      if (counter >= DATA_SECT_COUNT
+          && readMessage.major <= counter - DATA_SECT_COUNT)
       {
         readMessage.major = counter - DATA_SECT_COUNT + 1;
       }
@@ -524,7 +532,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         if (readMessage.minor == 0)
         {
           uint8_t head[12];
-          size_t offset = readMessage.major % DATA_SECT_COUNT + ADPCM_BUF_COUNT_PER_SECT * ADPCMBUF_SIZE;
+          size_t offset = readMessage.major % DATA_SECT_COUNT
+              + ADPCM_BUF_COUNT_PER_SECT * ADPCMBUF_SIZE;
           NVS_read(nvsHandle, offset, head, sizeof(head));
           readMessage.buf[0] = head[4];
           readMessage.buf[1] = head[5];
@@ -544,20 +553,13 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         }
         else
         {
-          size_t offset = readMessage.major % DATA_SECT_COUNT + 224 + readMessage.minor * 236;
+          size_t offset = readMessage.major % DATA_SECT_COUNT + 224
+              + readMessage.minor * 236;
           NVS_read(nvsHandle, offset, readMessage.buf, 236);
           readMessage.readLen = 236;
         }
 
         Audio_readDone();
-      }
-    }
-
-    if (loop > 5000)
-    {
-      while (1)
-      {
-        Task_sleep(1000 / Clock_tickPeriod);
       }
     }
   } /* end of loop */
@@ -580,8 +582,9 @@ static void startRecording(void)
 
   wctx->finished = false;
 
+  /** ahead of writing erasure */
   NVS_erase(nvsHandle, (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE,
-            SECT_SIZE);
+  SECT_SIZE);
 
   Task_sleep(10 * 1000 / Clock_tickPeriod);
 
@@ -675,7 +678,7 @@ static void stopRecording(void)
 
   for (int i = 0; i < NUM_PREV_STARTS; i++)
   {
-    wctx->prevStarts[i] = wctx->prevStarts[i+1];
+    wctx->prevStarts[i] = wctx->prevStarts[i + 1];
   }
   wctx->currStart = wctx->currPos;
   wctx->finished = true;
@@ -960,6 +963,10 @@ static void incrementCounter(void)
   }
 }
 
+/**
+ * @fn loadPrevStarts
+ *
+ */
 static void loadPrevStarts(void)
 {
   uint32_t counter = MONOTONIC_COUNTER;
@@ -981,23 +988,3 @@ static void loadPrevStarts(void)
   writeContext.currStart = counter;
   writeContext.currPos = counter;
 }
-
-//static void updateSegments(void)
-//{
-//  if (segments[0] == (uint32_t) -1) // uninitialized
-//  {
-//    segments[1] = wctx->currStart;
-//    segments[0] = wctx->currPos + 1;
-//  }
-//  else
-//  {
-//    if (segments[0] == wctx->currStart)
-//    {  // first sector
-//      for (int i = SEGMENT_NUM; i > 0; i--)
-//      {
-//        segments[i] = segments[i - 1];
-//      }
-//    }
-//    segments[0] = wctx->currPos + 1;
-//  }
-//}
