@@ -70,8 +70,9 @@
  * MACROS
  */
 
-#define LOG_ADPCM_DATA
-// #define LOG_PCM_DATA
+#if defined (LOG_ADPCM_DATA) && defined (UART_DEBUG)
+#error LOG_ADPCM_DATA and UART_DEBUG cannot be defined togeother
+#endif
 
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
@@ -193,10 +194,10 @@ typedef struct __attribute__ ((__packed__)) UartPacket
 
 #ifdef LOG_PCM_DATA
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22,
-               "wrong uart packet size"); //1022
+               "wrong uart packet size");
 #else
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22,
-               "wrong uart packet size");  // 222
+               "wrong uart packet size");
 #endif
 #endif
 
@@ -378,6 +379,24 @@ static void Audio_init(void)
 //  semParams.eventId = UART_TX_RDY_EVT;
   semParams.mode = Semaphore_Mode_BINARY;
   semUartTxReady = Semaphore_create(1, &semParams, Error_IGNORE);
+
+  UART_init();
+
+  UART_Params uartParams;
+  UART_Params_init(&uartParams);
+  uartParams.baudRate = 1500000; // 115200 * 8;
+  uartParams.readMode = UART_MODE_CALLBACK;
+  uartParams.readDataMode = UART_DATA_TEXT;
+  uartParams.readReturnMode = UART_RETURN_NEWLINE;
+  uartParams.readCallback = uartReadCallbackFxn;
+  uartParams.readEcho = UART_ECHO_OFF;
+  uartParams.writeMode = UART_MODE_CALLBACK;
+  uartParams.writeDataMode = UART_DATA_BINARY;
+  uartParams.writeCallback = uartWriteCallbackFxn;
+  uartHandle = UART_open(Board_UART0, &uartParams);
+#endif
+
+#if defined (UART_DEBUG)
   UART_init();
 #endif
 
@@ -599,24 +618,8 @@ static void startRecording(void)
     List_put(&wctx->recordingList, (List_Elem*) &wctx->i2sTransaction[k]);
   }
 
-#if defined(LOG_ADPCM_DATA)
 
-  if (uartHandle == NULL)
-  {
-    UART_Params uartParams;
-    UART_Params_init(&uartParams);
-    uartParams.baudRate = 1500000; // 115200 * 8;
-    uartParams.readMode = UART_MODE_CALLBACK;
-    uartParams.readDataMode = UART_DATA_TEXT;
-    uartParams.readReturnMode = UART_RETURN_NEWLINE;
-    uartParams.readCallback = uartReadCallbackFxn;
-    uartParams.readEcho = UART_ECHO_OFF;
-    uartParams.writeMode = UART_MODE_CALLBACK;
-    uartParams.writeDataMode = UART_DATA_BINARY;
-    uartParams.writeCallback = uartWriteCallbackFxn;
-    uartHandle = UART_open(Board_UART0, &uartParams);
-  }
-#endif
+
 
   /*
    * In board file, I2S_SELECT must be HIGH.
