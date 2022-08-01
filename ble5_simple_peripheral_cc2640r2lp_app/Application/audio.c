@@ -645,7 +645,7 @@ static void startRecording(void)
   i2sParams.SD0Channels = I2S_CHANNELS_MONO_INV;
   i2sParams.SD1Channels = I2S_CHANNELS_NONE;
   i2sParams.phaseType = I2S_PHASE_TYPE_DUAL;
-  i2sParams.fixedBufferLength = 240;
+  i2sParams.fixedBufferLength = PCMBUF_SIZE;
   i2sParams.startUpDelay = 0;
   i2sParams.MCLKDivider = 2;
   i2sParams.samplingFrequency = SAMPLE_RATE;
