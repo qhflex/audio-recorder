@@ -34,11 +34,14 @@
 #include <ti/drivers/NVS.h>
 #include <ti/drivers/nvs/NVSSPI25X.h>
 
+#include <ti/display/Display.h>
+
 #include <board.h>
 
 #include "simple_gatt_profile.h"
 
 #include "audio.h"
+
 
 /*********************************************************************
  *
@@ -70,8 +73,8 @@
  * MACROS
  */
 
-#if defined (LOG_ADPCM_DATA) && defined (UART_DEBUG)
-#error LOG_ADPCM_DATA and UART_DEBUG cannot be defined togeother
+#if defined (LOG_ADPCM_DATA) && !defined (Display_DISABLE_ALL)
+#error LOG_ADPCM_DATA conflicts with TI Display driver, Use Display_DISABLE_ALL to disable Display.
 #endif
 
 #define container_of(ptr, type, member) ({                      \
@@ -102,7 +105,10 @@
 #define AUDIO_START_REC                   Event_Id_01
 #define AUDIO_STOP_REC                    Event_Id_02
 #define AUDIO_READ_EVT                    Event_Id_03
-#define AUDIO_EVENTS                      (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC | AUDIO_READ_EVT )
+#define UART_TX_RDY_EVT                   Event_Id_04
+#define UART_RX_RDY_EVT                   Event_Id_05
+#define AUDIO_EVENTS                      (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC | AUDIO_READ_EVT \
+                                           | UART_TX_RDY_EVT | UART_RX_RDY_EVT)
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -116,7 +122,7 @@
 
 #define SECT_OFFSET(index)                (index * SECT_SIZE)
 
-#define MAX_RECORDING_SECTORS             30
+#define MAX_RECORDING_SECTORS             4
 
 /*
  * monotonic counter is used to record sectors used.
@@ -179,25 +185,25 @@ _Static_assert(offsetof(WriteContext_t, pcmBuf)==256,
 typedef struct __attribute__ ((__packed__)) UartPacket
 {
   uint64_t preamble;    // 0
-  uint32_t startSect;   // 8
-  uint32_t index;       // 12
-  int16_t prevSample;   // 16
-  uint8_t prevIndex;    // 18
-  uint8_t dummy;        // 19
+  uint32_t startSect;// 8
+  uint32_t index;// 12
+  int16_t prevSample;// 16
+  uint8_t prevIndex;// 18
+  uint8_t dummy;// 19
   uint8_t adpcm[ADPCMBUF_SIZE];
 #ifdef LOG_PCM_DATA
   uint8_t pcm[PCMBUF_SIZE];
 #endif
   uint8_t cka;
   uint8_t ckb;
-} UartPacket_t;
+}UartPacket_t;
 
 #ifdef LOG_PCM_DATA
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22,
-               "wrong uart packet size");
+    "wrong uart packet size");
 #else
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22,
-               "wrong uart packet size");
+    "wrong uart packet size");
 #endif
 #endif
 
@@ -214,32 +220,47 @@ Task_Struct mcTask;
 #endif
 uint8_t mcTaskStack[MC_TASK_STACK_SIZE];
 
-void (*audioMoreDataAvailable)(void) = NULL;
+#ifdef USE_UART_DISPLAY
+Display_Handle    dispHandle;
+#endif
 
 /*********************************************************************
  * LOCAL VARIABLES
  */
 /* Table of index changes */
 const static signed char IndexTable[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1,
-                                            -1, -1, 2, 4, 6, 8, };
+                                            -1,
+                                            -1, 2, 4, 6, 8, };
 
 /* Quantizer step size lookup table */
 const static int StepSizeTable[89] = { 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19,
-                                       21, 23, 25, 28, 31, 34, 37, 41, 45, 50,
-                                       55, 60, 66, 73, 80, 88, 97, 107, 118,
-                                       130, 143, 157, 173, 190, 209, 230, 253,
-                                       279, 307, 337, 371, 408, 449, 494, 544,
-                                       598, 658, 724, 796, 876, 963, 1060, 1166,
-                                       1282, 1411, 1552, 1707, 1878, 2066, 2272,
-                                       2499, 2749, 3024, 3327, 3660, 4026, 4428,
-                                       4871, 5358, 5894, 6484, 7132, 7845, 8630,
-                                       9493, 10442, 11487, 12635, 13899, 15289,
-                                       16818, 18500, 20350, 22385, 24623, 27086,
-                                       29794, 32767 };
+                                       21,
+                                       23, 25, 28, 31, 34, 37, 41, 45, 50,
+                                       55,
+                                       60, 66, 73, 80, 88, 97, 107, 118,
+                                       130,
+                                       143, 157, 173, 190, 209, 230, 253,
+                                       279,
+                                       307, 337, 371, 408, 449, 494, 544,
+                                       598,
+                                       658, 724, 796, 876, 963, 1060, 1166,
+                                       1282,
+                                       1411, 1552, 1707, 1878, 2066, 2272,
+                                       2499,
+                                       2749, 3024, 3327, 3660, 4026, 4428,
+                                       4871,
+                                       5358, 5894, 6484, 7132, 7845, 8630,
+                                       9493,
+                                       10442, 11487, 12635, 13899, 15289,
+                                       16818,
+                                       18500, 20350, 22385, 24623, 27086,
+                                       29794,
+                                       32767 };
 
 /* Used for calculating bitmap for monotonic counter */
 static const uint8_t markedBytes[8] = { 0x7f, 0x3f, 0x1f, 0x0f, 0x07, 0x03,
-                                        0x01, 0x00 };
+                                        0x01,
+                                        0x00 };
 
 /*
  * Synchronization
@@ -268,17 +289,13 @@ NVS_Attrs nvsAttrs;
 int markedBitsLo = -1;
 int markedBitsHi = -1;
 
-/*
- * segments
- */
-uint32_t segments[SEGMENT_NUM + 1] = { [0 ... SEGMENT_NUM]=(uint32_t) -1 };
-
 WriteContext_t writeContext = { };
 WriteContext_t *wctx = NULL;
 
 #if defined (LOG_ADPCM_DATA)
 UartPacket_t uartPkt;
 #endif
+
 
 /*********************************************************************
  * LOCAL FUNCTIONS
@@ -293,9 +310,9 @@ static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
                             I2S_Transaction *transactionPtr);
 
 #if defined (LOG_ADPCM_DATA)
-static void uartReadCallbackFxn(UART_Handle handle, void *buf, size_t count);
 static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count);
 #endif
+
 
 static char adpcmEncoder(short sample, int16_t *prevSample, uint8_t *prevIndex);
 void checksum(void *p, uint32_t len, uint8_t *a, uint8_t *b);
@@ -314,6 +331,8 @@ static void loadPrevStarts(void);
 
 static void startRecording(void);
 static void stopRecording(void);
+
+static void handleUartCmd(void);
 
 void Audio_startRecording(void)
 {
@@ -384,20 +403,16 @@ static void Audio_init(void)
 
   UART_Params uartParams;
   UART_Params_init(&uartParams);
-  uartParams.baudRate = 1500000; // 115200 * 8;
-  uartParams.readMode = UART_MODE_CALLBACK;
+  uartParams.baudRate = 1500000;// 115200 * 8;
+  uartParams.readMode = UART_MODE_BLOCKING;
   uartParams.readDataMode = UART_DATA_TEXT;
   uartParams.readReturnMode = UART_RETURN_NEWLINE;
-  uartParams.readCallback = uartReadCallbackFxn;
+  uartParams.readCallback = NULL;
   uartParams.readEcho = UART_ECHO_OFF;
   uartParams.writeMode = UART_MODE_CALLBACK;
   uartParams.writeDataMode = UART_DATA_BINARY;
   uartParams.writeCallback = uartWriteCallbackFxn;
   uartHandle = UART_open(Board_UART0, &uartParams);
-#endif
-
-#if defined (UART_DEBUG)
-  UART_init();
 #endif
 
   NVS_Params nvsParams;
@@ -417,15 +432,33 @@ static void Audio_init(void)
  */
 static void Audio_taskFxn(UArg a0, UArg a1)
 {
-
   Types_FreqHz freq;
   Timestamp_getFreq(&freq);
+
+  Display_init();
+
+  Display_Params dispParams;
+  Display_Params_init(&dispParams);
+
+  dispHandle = Display_open(Display_Type_ANY, &dispParams);
+  // Display_clear(dispHandle);
+  Display_print0(dispHandle, 0xff, 0, "audio task starting.");
 
   Audio_init();
 
   loadCounter();
+  Display_print2(dispHandle, 0xff, 0, "monotonic counter loaded, %d (%08x)",
+                 MONOTONIC_COUNTER, MONOTONIC_COUNTER);
 
   loadPrevStarts();
+  Display_print0(dispHandle, 0xff, 0, "prevs loaded");
+  for (int i = 0; i < NUM_PREV_STARTS; i++)
+  {
+    Display_print1(dispHandle, 0xff, 0, "  0x%08x", writeContext.prevStarts[i]);
+  }
+  Display_print4(dispHandle, 0xff, 0, "curr start %d (%08x), curr pos %d (%08x)",
+                 writeContext.currStart, writeContext.currStart,
+                 writeContext.currPos, writeContext.currPos);
 
   Event_post(audioEvent, AUDIO_START_REC);
 
@@ -435,11 +468,13 @@ static void Audio_taskFxn(UArg a0, UArg a1)
                                 BIOS_WAIT_FOREVER);
     if (event & AUDIO_START_REC)
     {
+      Display_print0(dispHandle, 0xff, 0, "event: AUDIO_START_REC");
       startRecording();
     }
 
     if (event & AUDIO_STOP_REC)
     {
+      Display_print0(dispHandle, 0xff, 0, "event: AUDIO_STOP_REC");
       stopRecording();
     }
 
@@ -492,29 +527,48 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
 #endif
           List_put(&wctx->recordingList, (List_Elem*) ttt);
+
+
           if (adpcmInUse == ADPCMBUF_NUM - 1)
           {
             if (wctx->adpcmCountInSect == adpcmInUse)
             {
               // uint32_t bufCount = 0;
               size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE;
-              NVS_write(nvsHandle, offset, wctx,
-                        96 + ADPCMBUF_SIZE * ADPCMBUF_NUM, 0);
+              size_t size = 96 + ADPCMBUF_SIZE * ADPCMBUF_NUM;
+              NVS_write(nvsHandle, offset, wctx, size, 0); // NVS_WRITE_POST_VERIFY);
+
+              Display_print5(
+                  dispHandle, 0xff, 0,
+                  "nvs write, pos %d, cnt %d, cntInSect %02d, offset %d (rem4k %d), size 256",
+                  wctx->currPos,
+                  wctx->adpcmCount,
+                  wctx->adpcmCountInSect, offset, offset % 4096);
             }
             else
             {
-              uint32_t writtenBufCount = wctx->adpcmCountInSect % ADPCMBUF_NUM
+              uint32_t writtenBufCount = wctx->adpcmCountInSect / ADPCMBUF_NUM
                   * ADPCMBUF_NUM;
               size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE + 96
                   + writtenBufCount * ADPCMBUF_SIZE;
-              NVS_write(nvsHandle, offset, &wctx->adpcmBuf[0],
-              ADPCMBUF_SIZE * ADPCMBUF_NUM,
-                        0); // NVS_WRITE_POST_VERIFY);
+              size_t size = ADPCMBUF_SIZE * ADPCMBUF_NUM;
+              NVS_write(nvsHandle, offset, &wctx->adpcmBuf[0], size, 0); // NVS_WRITE_POST_VERIFY);
+
+              Display_print5(
+                  dispHandle, 0xff, 0,
+                  "nvs write, pos %d, cnt %d, cntInSect %02d, offset %d (rem4k %d), size 160",
+                  wctx->currPos,
+                  wctx->adpcmCount,
+                  wctx->adpcmCountInSect, offset, offset % 4096);
             }
           }
 
           wctx->adpcmCount++;
           wctx->adpcmCountInSect = wctx->adpcmCount % ADPCM_BUF_COUNT_PER_SECT;
+
+          // This generates too much output
+          //        Display_print2(dispHandle, 0xff, 0, "-- cnt %d, cntInSect %d",
+          //                       wctx->adpcmCount, wctx->adpcmCountInSect);
 
           // last adpcm buf in sect
           if (wctx->adpcmCountInSect == 0)
@@ -522,13 +576,33 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             wctx->currPos++;
             wctx->sectAdpcmState = wctx->adpcmState;
             incrementCounter();
+
+            Display_print4(dispHandle, 0xff, 0,
+                           "increment sect, pos: %d (%08x), counter %d (%08x)",
+                           wctx->currPos, wctx->currPos, MONOTONIC_COUNTER,
+                           MONOTONIC_COUNTER);
+
             /* it is important to do this here */
-            NVS_erase(nvsHandle, (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE,
-                      SECT_SIZE);
+            size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE;
+            NVS_erase(nvsHandle, offset, SECT_SIZE);
+
+            Display_print2(dispHandle, 0xff, 0, "nvs erase %d (0x08x)", offset, offset);
 
             if (wctx->currPos - wctx->currStart == MAX_RECORDING_SECTORS)
             {
+              Display_print2(
+                  dispHandle,
+                  0xff,
+                  0,
+                  "max rec sect reached, before stopRecording(). start %d, pos %d",
+                  wctx->currStart, wctx->currPos);
               stopRecording();
+              Display_print2(
+                  dispHandle,
+                  0xff,
+                  0,
+                  "max rec sect reached, after stopRecording(). start %d, pos %d",
+                  wctx->currStart, wctx->currPos);
             }
           }
         } /* end of if ttt != NULL */
@@ -580,7 +654,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
         Audio_readDone();
       }
-    }
+    } // AUDIO_READ_EVT
+
   } /* end of loop */
 }
 
@@ -617,9 +692,6 @@ static void startRecording(void)
     wctx->i2sTransaction[k].bufSize = PCMBUF_SIZE;
     List_put(&wctx->recordingList, (List_Elem*) &wctx->i2sTransaction[k]);
   }
-
-
-
 
   /*
    * In board file, I2S_SELECT must be HIGH.
@@ -723,10 +795,6 @@ static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
 }
 
 #if defined (LOG_ADPCM_DATA)
-static void uartReadCallbackFxn(UART_Handle handle, void *buf, size_t count)
-{
-}
-
 static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count)
 {
   Semaphore_post(semUartTxReady);
@@ -990,4 +1058,21 @@ static void loadPrevStarts(void)
 
   writeContext.currStart = counter;
   writeContext.currPos = counter;
+}
+
+static void handleUartCmd(void)
+{
+//  if (strlen(uartReadBuf) == 0)
+//    return;
+//
+//  if (strcmp(uartReadBuf, "help") == 0)
+//  {
+//    char rep[]="no help\n";
+//    UART_write(uartHandle, rep, strlen(rep));
+//  }
+}
+
+static void print_prevs(void)
+{
+
 }

@@ -71,6 +71,12 @@
 icall_userCfg_t user0Cfg = BLE_USER_CFG;
 #endif // USE_DEFAULT_USER_CFG
 
+#ifdef USE_UART_DISPLAY
+#include <ti/display/Display.h>
+
+extern Display_Handle dispHandle;
+#endif
+
 /*******************************************************************************
  * MACROS
  */
