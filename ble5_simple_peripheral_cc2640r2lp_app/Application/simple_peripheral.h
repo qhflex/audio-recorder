@@ -84,7 +84,8 @@ extern void SimplePeripheral_createTask(void);
 
 void SimplePeripheral_subscribe(void);
 void SimplePeripheral_unsubscribe(void);
-void SimplePeripheral_seek(uint32_t sect);
+
+void SimplePeripheral_txReady(void);
 
 /*********************************************************************
 *********************************************************************/

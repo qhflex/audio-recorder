@@ -136,14 +136,12 @@ extern gattAttribute_t *simpleProfileChar1ConfigAttrHandle;
 #define SP_QUEUE_EVT                            Event_Id_30
 #define SP_SUBSCRIBE_EVT                        Event_Id_29
 #define SP_UNSUBSCRIBE_EVT                      Event_Id_28
-#define SP_READ_EVT                             Event_Id_27
+#define SP_TXRDY_EVT                            Event_Id_27
 #define SP_HTIMER_EVT                           Event_Id_26
-#define SP_READDONE_EVT                         Event_Id_25
 
 // Bitwise OR of all RTOS events to pend on
-#define SP_ALL_EVENTS                           (SP_ICALL_EVT | SP_QUEUE_EVT | \
-                                                SP_SUBSCRIBE_EVT | SP_UNSUBSCRIBE_EVT | SP_READ_EVT |\
-                                                SP_HTIMER_EVT | SP_READDONE_EVT)
+#define SP_ALL_EVENTS                           (SP_ICALL_EVT | SP_QUEUE_EVT | SP_SUBSCRIBE_EVT | \
+                                                 SP_UNSUBSCRIBE_EVT | SP_TXRDY_EVT | SP_HTIMER_EVT )
 
 // Size of string-converted device address ("0xXXXXXXXXXXXX")
 #define SP_ADDR_STR_SIZE                        15
@@ -154,29 +152,6 @@ extern gattAttribute_t *simpleProfileChar1ConfigAttrHandle;
 /*********************************************************************
  * TYPEDEFS
  */
-//typedef enum
-//{
-//  NOTI_OFF = 0, NOTI_ON,
-//} NotiStatus_t;
-typedef struct
-{
-  int start;
-  int end;
-} ReadRequest_t;
-
-typedef enum
-{
-  SS_PENDING, SS_READING, SS_NOTIFYING
-} NotiSubstate_t;
-
-typedef struct NotiContext
-{
-  int notiSession;
-  int readSession;        // readSession == 0 means no read request arrived yet
-  int start;
-  int end;
-  NotiSubstate_t subState;
-} NotiContext_t;
 
 /*********************************************************************
  * GLOBAL VARIABLES
@@ -190,8 +165,6 @@ Task_Struct spTask;
 #pragma data_alignment=8
 #endif
 uint8_t spTaskStack[SP_TASK_STACK_SIZE];
-
-ReadMessage_t readMessage = { };
 
 /*********************************************************************
  * LOCAL VARIABLES
@@ -247,15 +220,11 @@ static uint8 advHandleLegacy;
 // Address mode
 static GAP_Addr_Modes_t addrMode = DEFAULT_ADDRESS_MODE;
 
-static int notiSessionCounter = 0;
 
-static NotiContext_t notiContext;
-static NotiContext_t *nctx = NULL;
 
-static ReadRequest_t rr = { };
-static Semaphore_Handle semReadReq;
-
+static bool subscriptionOn;
 static GPTimerCC26XX_Handle hTimer;
+static Mail_t message = { 0 };
 
 void timerCallback(GPTimerCC26XX_Handle handle,
                    GPTimerCC26XX_IntMask interruptMask)
@@ -281,21 +250,12 @@ static uint8_t SimplePeripheral_clearConnListEntry(uint16_t connHandle);
 
 static void SimplePeripheral_startTimer(void);
 static void SimplePeripheral_stopTimer(void);
-static bool SimplePeripheral_isLastMessage(void);
-static void SimplePeripheral_doNotify(void);
+
+static bool SimplePeripheral_doNotify(void);
 
 static void SimplePeripheral_onSubscribe(void);
 static void SimplePeripheral_onUnsubscribe(void);
-static void SimplePeripheral_onRead(void);
-static void SimplePeripheral_onReadDone(void);
-static void SimplePeripheral_onTimer(void);
-
-static void SimplePeripheral_enterPending(void);
-static void SimplePeripheral_exitPending(void);
-static void SimplePeripheral_enterReading(void);
-static void SimplePeripheral_exitReading(void);
-static void SimplePeripheral_enterNotifying(void);
-static void SimplePeripheral_exitNotifying(void);
+static void SimplePeripheral_drain(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -355,18 +315,11 @@ void SimplePeripheral_unsubscribe(void)
   Event_post(syncEvent, SP_UNSUBSCRIBE_EVT);
 }
 
-void SimplePeripheral_read(int start, int end)
+void SimplePeripheral_txReady(void)
 {
-  rr.start = start;
-  rr.end = end;
-  Event_post(syncEvent, SP_READ_EVT);
+  Event_post(syncEvent, SP_TXRDY_EVT);
 }
 
-void Audio_readDone()
-{
-  readMessage.status = RM_RESPONDED;
-  Event_post(syncEvent, SP_READDONE_EVT);
-}
 
 /*********************************************************************
  * @fn      SimplePeripheral_init
@@ -448,14 +401,7 @@ static void SimplePeripheral_init(void)
   params.debugStallMode = GPTimerCC26XX_DEBUG_STALL_OFF;
   hTimer = GPTimerCC26XX_open(Board_GPTIMER0A, &params); // Board_GPTIMER0A
 
-  // Initialize rr lock
-  Semaphore_Params semParams;
-  Semaphore_Params_init(&semParams);
-  semParams.mode = Semaphore_Mode_BINARY;
-  semReadReq = Semaphore_create(1, &semParams, Error_IGNORE);
-
-  // Initialize message status
-  readMessage.status = RM_IDLE;
+  subscriptionOn = false;
 }
 
 /*********************************************************************
@@ -524,19 +470,14 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         SimplePeripheral_onUnsubscribe();
       }
 
-      if (events & SP_READ_EVT)
+      if (events & SP_TXRDY_EVT)
       {
-        SimplePeripheral_onRead();
-      }
-
-      if (events & SP_READDONE_EVT)
-      {
-        SimplePeripheral_onReadDone();
+        SimplePeripheral_drain();
       }
 
       if (events & SP_HTIMER_EVT)
       {
-        SimplePeripheral_onTimer();
+        SimplePeripheral_drain();
       }
     }
   }
@@ -711,6 +652,8 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg)
     GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 
     SimplePeripheral_onUnsubscribe();
+
+    Audio_unsubscribe();
     break;
   }
 
@@ -860,29 +803,19 @@ static void SimplePeripheral_stopTimer(void)
   GPTimerCC26XX_stop(hTimer);
 }
 
-static bool SimplePeripheral_isLastMessage(void)
-{
-  if (readMessage.minor == 16 && readMessage.major + 1 == nctx->end)
-    return true;
-  if (readMessage.readLen == 2 && readMessage.buf[0] == 0xee
-      && readMessage.buf[1] == 0x0f)
-    return true;
-  return false;
-}
-
-static void SimplePeripheral_doNotify(void)
+static bool SimplePeripheral_doNotify(void)
 {
   attHandleValueNoti_t noti;
   bStatus_t status;
 
   noti.pValue = (uint8_t*) GATT_bm_alloc(connList[0], ATT_HANDLE_VALUE_NOTI,
-                                         readMessage.readLen, &noti.len);
+                                         message.len, &noti.len);
   if (noti.pValue == NULL)
   {
-    return;
+    return false;
   }
 
-  memcpy(noti.pValue, readMessage.buf, noti.len);
+  memcpy(noti.pValue, message.p, noti.len);
   noti.handle = simpleProfileChar1ValueAttrHandle->handle;
   status = GATT_Notification(connList[0], &noti, 0);
 
@@ -890,190 +823,48 @@ static void SimplePeripheral_doNotify(void)
    * If mtu is not requested to be 251, we got 0x1B.
    * #define  bleInvalidMtuSize   0x1B
    */
-  if (status != SUCCESS)
+  if (status == SUCCESS)
+  {
+    return true;
+  }
+  else
   {
     GATT_bm_free((gattMsg_t*) &noti, ATT_HANDLE_VALUE_NOTI);
-    return;
-  }
-
-  if (SimplePeripheral_isLastMessage())
-  {
-    SimplePeripheral_exitNotifying();
-    readMessage.status = RM_IDLE;
-    nctx->subState = SS_PENDING;
-    SimplePeripheral_enterPending();
+    return false;
   }
 }
 
 static void SimplePeripheral_onSubscribe(void)
 {
-  nctx = &notiContext;
-  memset(nctx, 0, sizeof(*nctx));
-  nctx->notiSession = notiSessionCounter++;
-  nctx->readSession = 0;
-  nctx->subState = SS_PENDING;
-  SimplePeripheral_enterPending();
+  subscriptionOn = true;
+  SimplePeripheral_startTimer();
 }
 
 static void SimplePeripheral_onUnsubscribe(void)
 {
-  if (!nctx)
-    return;
-
-  switch (nctx->subState)
-  {
-  case SS_PENDING:
-    // if message owned in this state, the status should be RM_IDLE already
-    // if not owned, the message status should not be modified
-    SimplePeripheral_exitPending();
-    break;
-  case SS_READING:
-    // message not owned
-    SimplePeripheral_exitReading();
-    break;
-  case SS_NOTIFYING:
-    SimplePeripheral_exitNotifying();
-    // message owned
-    readMessage.status = RM_IDLE;
-    break;
-  }
-  nctx = NULL;
+  SimplePeripheral_stopTimer();
+  subscriptionOn = false;
+  SimplePeripheral_drain();
 }
 
-static void SimplePeripheral_onRead(void)
+static void SimplePeripheral_drain(void)
 {
-  int start, end;
-
-  if (!nctx)
-    return;
-
-  Semaphore_pend(semReadReq, BIOS_WAIT_FOREVER);
-  start = rr.start;
-  end = rr.end;
-  Semaphore_post(semReadReq);
-
-  // update readSession anyway
-  nctx->readSession++;
-  nctx->start = start;
-  nctx->end = end;
-
-  switch (nctx->subState)
+  if (subscriptionOn)
   {
-  case SS_PENDING:
-    if (readMessage.status == RM_IDLE) // goto SS_READING
+    while ((message.p || Mailbox_pend(outgoingMailbox, &message, 0)) && SimplePeripheral_doNotify())
     {
-      SimplePeripheral_exitPending();
-      nctx->subState = SS_READING;
-      SimplePeripheral_enterReading();
-    }
-    break;
-
-  case SS_NOTIFYING:
-    SimplePeripheral_exitNotifying();
-    nctx->subState = SS_READING;
-    SimplePeripheral_enterReading();
-    break;
-
-  default:
-    break;
-  }
-}
-
-static void SimplePeripheral_onReadDone(void)
-{
-  if (!nctx)
-  {
-    readMessage.status = RM_IDLE;
-    return;
-  }
-
-  switch (nctx->subState)
-  {
-  case SS_PENDING:              // the response is tooooo outdated, really.
-    // TODO
-    break;
-
-  case SS_READING:
-    if (readMessage.notiSession == nctx->notiSession
-        && readMessage.readSession == nctx->readSession)
-    {
-      SimplePeripheral_exitReading();
-      nctx->subState = SS_NOTIFYING;
-      SimplePeripheral_enterNotifying();
-    }
-    else
-    {
-      // re-entering
-      SimplePeripheral_exitReading();
-      nctx->subState = SS_READING;
-      SimplePeripheral_enterReading();
-    }
-    break;
-
-  case SS_NOTIFYING:
-    // TODO spin?
-    break;
-  }
-}
-
-static void SimplePeripheral_onTimer(void)
-{
-  if (nctx && nctx->subState == SS_NOTIFYING)
-  {
-    SimplePeripheral_doNotify();
-  }
-}
-
-static void SimplePeripheral_enterPending(void)
-{
-  // nothing to do
-}
-
-static void SimplePeripheral_exitPending(void)
-{
-  // nothing to do
-}
-
-static void SimplePeripheral_enterReading(void)
-{
-  if (readMessage.notiSession == nctx->notiSession
-      && readMessage.readSession == nctx->readSession)
-  {
-    readMessage.minor++;
-    if (readMessage.minor == 16)
-    {
-      readMessage.minor = 0;
-      readMessage.major++;
+      ICall_free(message.p);
+      message.p = 0;
     }
   }
   else
   {
-    readMessage.notiSession = nctx->notiSession;
-    readMessage.readSession = nctx->readSession;
-    readMessage.start = nctx->start;
-    readMessage.end = nctx->end;
-    readMessage.readType = 0;
-    readMessage.major = nctx->start;
-    readMessage.minor = 0;
+    while (message.p || Mailbox_pend(outgoingMailbox, &message, 0))
+    {
+      ICall_free(message.p);
+      message.p = 0;
+    }
   }
-
-  Audio_read();
-}
-
-static void SimplePeripheral_exitReading(void)
-{
-  // nothing to do
-}
-
-static void SimplePeripheral_enterNotifying(void)
-{
-  SimplePeripheral_startTimer();
-  SimplePeripheral_doNotify();
-}
-
-static void SimplePeripheral_exitNotifying(void)
-{
-  SimplePeripheral_stopTimer();
 }
 
 /*********************************************************************

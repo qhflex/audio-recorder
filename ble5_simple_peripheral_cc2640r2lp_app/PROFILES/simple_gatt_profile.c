@@ -471,7 +471,7 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
         void *p = ICall_malloc(len);
         if (p) {
           memcpy(p, pValue, len);
-          Mail_t msg = { .size = len, .p = p };
+          Mail_t msg = { .len = len, .p = p };
           if (Mailbox_post(incomingMailbox, &msg, 0))
           {
             status = SUCCESS;

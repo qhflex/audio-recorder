@@ -109,10 +109,10 @@
 #define UART_RX_RDY_EVT                   Event_Id_05
 #define AUDIO_INCOMING_MSG                Event_Id_06
 #define AUDIO_OUTGOING_MSG                Event_Id_07
+#define AUDIO_BLE_SUBSCRIBE               Event_Id_08
+#define AUDIO_BLE_UNSUBSCRIBE             Event_Id_09
 
-
-
-#define AUDIO_REC_AUTOSTOP                Event_Id_30 // used for debugging
+#define AUDIO_REC_AUTOSTOP                Event_Id_31 // used for debugging
 
 
 #define AUDIO_EVENTS                                \
@@ -384,8 +384,6 @@ static void loadPrevStarts(void);
 static void startRecording(void);
 static void stopRecording(void);
 
-static void handleUartCmd(void);
-
 void Audio_subscribe(void)
 {
   Event_post(audioEvent, AUDIO_BLE_SUBSCRIBE);
@@ -394,17 +392,6 @@ void Audio_subscribe(void)
 void Audio_unsubscribe(void)
 {
   Event_post(audioEvent, AUDIO_BLE_UNSUBSCRIBE);
-}
-
-/*********************************************************************
- * @fn      Audio_read
- *
- * @brief   Task creation function for the Simple Peripheral.
- */
-void Audio_read()
-{
-  readMessage.status = RM_REQUESTED;
-  Event_post(audioEvent, AUDIO_READ_EVT);
 }
 
 /*********************************************************************
@@ -730,52 +717,6 @@ static void Audio_taskFxn(UArg a0, UArg a1)
     }
 #endif
 
-    if (event & AUDIO_READ_EVT)
-    {
-      readMessage.status = RM_PROCESSING_REQUEST;
-
-      uint32_t counter = MONOTONIC_COUNTER;
-      if (counter >= DATA_SECT_COUNT
-          && readMessage.major <= counter - DATA_SECT_COUNT)
-      {
-        readMessage.major = counter - DATA_SECT_COUNT + 1;
-      }
-
-      if (readMessage.major < counter)
-      {
-        if (readMessage.minor == 0)
-        {
-          uint8_t head[12];
-          size_t offset = readMessage.major % DATA_SECT_COUNT
-              + ADPCM_BUF_COUNT_PER_SECT * ADPCMBUF_SIZE;
-          NVS_read(nvsHandle, offset, head, sizeof(head));
-          readMessage.buf[0] = head[4];
-          readMessage.buf[1] = head[5];
-          readMessage.buf[2] = head[6];
-          readMessage.buf[3] = head[7];
-          readMessage.buf[4] = head[8];
-          readMessage.buf[5] = head[9];
-          readMessage.buf[6] = head[10];
-          readMessage.buf[7] = head[11];
-          readMessage.buf[8] = head[0];
-          readMessage.buf[9] = head[1];
-          readMessage.buf[10] = head[2];
-          readMessage.buf[11] = head[3];
-          offset = readMessage.major % DATA_SECT_COUNT;
-          NVS_read(nvsHandle, offset, &readMessage.buf[12], 236 - 12);
-          readMessage.readLen = 236;
-        }
-        else
-        {
-          size_t offset = readMessage.major % DATA_SECT_COUNT + 224
-              + readMessage.minor * 236;
-          NVS_read(nvsHandle, offset, readMessage.buf, 236);
-          readMessage.readLen = 236;
-        }
-
-        Audio_readDone();
-      }
-    } // AUDIO_READ_EVT
 
   } /* end of loop */
 }
@@ -1186,14 +1127,3 @@ static void loadPrevStarts(void)
   writeContext.currPos = counter;
 }
 
-static void handleUartCmd(void)
-{
-//  if (strlen(uartReadBuf) == 0)
-//    return;
-//
-//  if (strcmp(uartReadBuf, "help") == 0)
-//  {
-//    char rep[]="no help\n";
-//    UART_write(uartHandle, rep, strlen(rep));
-//  }
-}
