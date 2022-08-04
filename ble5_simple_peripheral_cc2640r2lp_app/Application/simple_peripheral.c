@@ -125,7 +125,7 @@ extern gattAttribute_t *simpleProfileChar1ConfigAttrHandle;
 #define DEFAULT_PARAM_UPDATE_REQ_DECISION       GAP_UPDATE_REQ_ACCEPT_ALL // GAP_UPDATE_REQ_PASS_TO_APP
 
 // Task configuration
-#define SP_TASK_PRIORITY                        1
+#define SP_TASK_PRIORITY                        4
 
 #ifndef SP_TASK_STACK_SIZE
 #define SP_TASK_STACK_SIZE                      644

@@ -378,10 +378,6 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
     uint16 uuid = BUILD_UINT16(pAttr->type.uuid[12], pAttr->type.uuid[13]);
     switch (uuid)
     {
-//      case SIMPLEPROFILE_CHAR1_UUID:
-//        *pLen = SIMPLEPROFILE_CHAR1_LEN;
-//        VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_CHAR1_LEN );
-//        break;
     case SIMPLEPROFILE_CHAR2_UUID:
       *pLen = 1;
       pValue[0] = *pAttr->pValue;
@@ -446,10 +442,12 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
         if (*ccfg == GATT_CLIENT_CFG_NOTIFY)
         {
           SimplePeripheral_subscribe();
+          Audio_subscribe();
         }
         else if (*ccfg == GATT_CFG_NO_OPERATION)
         {
           SimplePeripheral_unsubscribe();
+          Audio_unsubscribe();
         }
       }
       break;
@@ -467,49 +465,31 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
     switch (uuid)
     {
     case SIMPLEPROFILE_CHAR1_UUID:
-      // Make sure it's not a blob oper
+      // Make sure it's not a blob operation
       if (offset == 0)
       {
-        if (len != 1)   // TODO check length here
-        {
-          status = ATT_ERR_INVALID_VALUE_SIZE;
-        }
-      }
-      else
-      {
-        status = ATT_ERR_ATTR_NOT_LONG;
-      }
-
-      //Write the value
-      if (status == SUCCESS)
-      {
-        // TODO do something here
-      }
-      break;
-
-    case SIMPLEPROFILE_CHAR2_UUID:
-      if (offset == 0)
-      {
-        if (len != 1)
-        {
-          status = ATT_ERR_INVALID_VALUE_SIZE;
-        }
-      }
-      else
-      {
-        status = ATT_ERR_ATTR_NOT_LONG;
-      }
-
-      if (status == SUCCESS)
-      {
-        if (pValue[0] == 0)
-        {
-          Audio_stopRecording();
+        void *p = ICall_malloc(len);
+        if (p) {
+          memcpy(p, pValue, len);
+          Mail_t msg = { .size = len, .p = p };
+          if (Mailbox_post(incomingMailbox, &msg, 0))
+          {
+            status = SUCCESS;
+          }
+          else
+          {
+            ICall_free(p);
+            status = ATT_ERR_INSUFFICIENT_RESOURCES;
+          }
         }
         else
         {
-          Audio_startRecording();
+          status = ATT_ERR_INSUFFICIENT_RESOURCES;
         }
+      }
+      else
+      {
+        status = ATT_ERR_ATTR_NOT_LONG;
       }
       break;
 

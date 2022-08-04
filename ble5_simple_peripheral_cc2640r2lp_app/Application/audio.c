@@ -18,9 +18,9 @@
 #include <xdc/runtime/Timestamp.h>
 
 #include <ti/sysbios/BIOS.h>
-#include <ti/sysbios/gates/GateSwi.h>
 #include <ti/sysbios/knl/Task.h>
 #include <ti/sysbios/knl/Semaphore.h>
+#include <ti/sysbios/knl/Mailbox.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
 
@@ -107,9 +107,18 @@
 #define AUDIO_READ_EVT                    Event_Id_03
 #define UART_TX_RDY_EVT                   Event_Id_04
 #define UART_RX_RDY_EVT                   Event_Id_05
-#define AUDIO_REC_AUTOSTOP                Event_Id_10 // used for debugging
-#define AUDIO_EVENTS                      (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC | AUDIO_READ_EVT \
-                                           | UART_TX_RDY_EVT | UART_RX_RDY_EVT | AUDIO_REC_AUTOSTOP)
+#define AUDIO_INCOMING_MSG                Event_Id_06
+#define AUDIO_OUTGOING_MSG                Event_Id_07
+
+
+
+#define AUDIO_REC_AUTOSTOP                Event_Id_30 // used for debugging
+
+
+#define AUDIO_EVENTS                                \
+  (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC | AUDIO_READ_EVT | \
+   UART_TX_RDY_EVT | UART_RX_RDY_EVT | AUDIO_INCOMING_MSG | AUDIO_OUTGOING_MSG | \
+   AUDIO_REC_AUTOSTOP | AUDIO_BLE_SUBSCRIBE | AUDIO_BLE_UNSUBSCRIBE )
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -264,6 +273,10 @@ uint8_t mcTaskStack[MC_TASK_STACK_SIZE];
 Display_Handle    dispHandle;
 #endif
 
+Event_Handle audioEvent;
+Mailbox_Handle incomingMailbox;
+Mailbox_Handle outgoingMailbox;
+
 /*********************************************************************
  * LOCAL VARIABLES
  */
@@ -305,7 +318,7 @@ static const uint8_t markedBytes[8] = { 0x7f, 0x3f, 0x1f, 0x0f, 0x07, 0x03,
 /*
  * Synchronization
  */
-static Event_Handle audioEvent = NULL;
+
 static Semaphore_Handle semDataReadyForTreatment = NULL;
 
 #if defined (LOG_ADPCM_DATA)
@@ -373,14 +386,14 @@ static void stopRecording(void);
 
 static void handleUartCmd(void);
 
-void Audio_startRecording(void)
+void Audio_subscribe(void)
 {
-
+  Event_post(audioEvent, AUDIO_BLE_SUBSCRIBE);
 }
 
-void Audio_stopRecording(void)
+void Audio_unsubscribe(void)
 {
-
+  Event_post(audioEvent, AUDIO_BLE_UNSUBSCRIBE);
 }
 
 /*********************************************************************
@@ -430,6 +443,17 @@ static void Audio_init(void)
   semParams.event = audioEvent;
   semParams.eventId = AUDIO_PCM_EVT;
   semDataReadyForTreatment = Semaphore_create(0, &semParams, Error_IGNORE);
+
+  Mailbox_Params mboxParams;
+  Mailbox_Params_init(&mboxParams);
+  mboxParams.readerEvent = audioEvent;
+  mboxParams.readerEventId = AUDIO_INCOMING_MSG;
+  incomingMailbox = Mailbox_create(sizeof(Mail_t), 2, &mboxParams, Error_IGNORE);
+
+  Mailbox_Params_init(&mboxParams);
+  mboxParams.writerEvent = audioEvent;
+  mboxParams.writerEventId = AUDIO_OUTGOING_MSG;
+  outgoingMailbox = Mailbox_create(sizeof(Mail_t), 2, &mboxParams, Error_IGNORE);
 
 #if defined (LOG_ADPCM_DATA)
   Semaphore_Params_init(&semParams);
@@ -758,6 +782,9 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
 static void startRecording(void)
 {
+  if (!wctx->finished)
+    return;
+
   simpleProfileChar2 = 1;
 
   wctx = &writeContext; // is here the right place? TODO
@@ -841,6 +868,9 @@ static void startRecording(void)
 
 static void stopRecording(void)
 {
+  if (wctx->finished)
+    return;
+
   if (i2sHandle)
   {
     I2S_stopRead(i2sHandle);

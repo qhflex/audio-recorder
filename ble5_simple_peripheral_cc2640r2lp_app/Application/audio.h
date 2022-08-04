@@ -12,6 +12,8 @@
 #include <stdbool.h>
 
 #include <ti/sysbios/knl/Semaphore.h>
+#include <ti/sysbios/knl/Event.h>
+#include <ti/sysbios/knl/Mailbox.h>
 
 void Audio_createTask(void);
 
@@ -50,12 +52,26 @@ typedef struct ReadMessage
 
 extern ReadMessage_t readMessage; // singleton
 
-void Audio_startRecording();
-void Audio_stopRecording();
-
 /** this function is implemented by audio */
 void Audio_read();
 /** this function is implemented by caller, ble or uart */
 void Audio_readDone();
+
+void Audio_subscribe();
+void Audio_unsubscribe();
+
+typedef struct Mail
+{
+  size_t size;  // when size == 0, this is a command
+  void * p;
+} Mail_t;
+
+#define AUDIO_BLE_SUBSCRIBE               Event_Id_20
+#define AUDIO_BLE_UNSUBSCRIBE             Event_Id_21
+
+extern Event_Handle audioEvent;
+
+extern Mailbox_Handle incomingMailbox;
+extern Mailbox_Handle outgoingMailbox;
 
 #endif /* APPLICATION_AUDIO_H_ */
