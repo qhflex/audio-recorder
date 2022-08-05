@@ -61,7 +61,6 @@
 #include <ti/sysbios/knl/Task.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
-#include <ti/sysbios/knl/Queue.h>
 #include <ti/sysbios/knl/Semaphore.h>
 
 #include <ti/drivers/timer/GPTimerCC26XX.h>
@@ -78,15 +77,16 @@
 /* This Header file contains all BLE API and icall structure definition */
 #include <icall_ble_api.h>
 
-#include <simple_gatt_profile.h>
-
 #ifdef USE_RCOSC
 #include <rcosc_calibration.h>
 #endif //USE_RCOSC
 
+#include <ti/display/Display.h>
+
 #include <board.h>
 
 #include "audio.h"
+#include "simple_gatt_profile.h"
 #include "simple_peripheral.h"
 
 extern gattAttribute_t *simpleProfileChar1ValueAttrHandle;
@@ -136,12 +136,12 @@ extern gattAttribute_t *simpleProfileChar1ConfigAttrHandle;
 #define SP_QUEUE_EVT                            Event_Id_30
 #define SP_SUBSCRIBE_EVT                        Event_Id_29
 #define SP_UNSUBSCRIBE_EVT                      Event_Id_28
-#define SP_TXRDY_EVT                            Event_Id_27
+#define SP_READABLE_EVT                         Event_Id_27
 #define SP_HTIMER_EVT                           Event_Id_26
 
 // Bitwise OR of all RTOS events to pend on
 #define SP_ALL_EVENTS                           (SP_ICALL_EVT | SP_QUEUE_EVT | SP_SUBSCRIBE_EVT | \
-                                                 SP_UNSUBSCRIBE_EVT | SP_TXRDY_EVT | SP_HTIMER_EVT )
+                                                 SP_UNSUBSCRIBE_EVT | SP_READABLE_EVT | SP_HTIMER_EVT )
 
 // Size of string-converted device address ("0xXXXXXXXXXXXX")
 #define SP_ADDR_STR_SIZE                        15
@@ -165,6 +165,8 @@ Task_Struct spTask;
 #pragma data_alignment=8
 #endif
 uint8_t spTaskStack[SP_TASK_STACK_SIZE];
+
+extern Display_Handle dispHandle;
 
 /*********************************************************************
  * LOCAL VARIABLES
@@ -220,11 +222,9 @@ static uint8 advHandleLegacy;
 // Address mode
 static GAP_Addr_Modes_t addrMode = DEFAULT_ADDRESS_MODE;
 
-
-
 static bool subscriptionOn;
 static GPTimerCC26XX_Handle hTimer;
-static Mail_t message = { 0 };
+static List_List readingList;
 
 void timerCallback(GPTimerCC26XX_Handle handle,
                    GPTimerCC26XX_IntMask interruptMask)
@@ -251,11 +251,11 @@ static uint8_t SimplePeripheral_clearConnListEntry(uint16_t connHandle);
 static void SimplePeripheral_startTimer(void);
 static void SimplePeripheral_stopTimer(void);
 
-static bool SimplePeripheral_doNotify(void);
+static bool SimplePeripheral_doNotify(int where);
 
 static void SimplePeripheral_onSubscribe(void);
 static void SimplePeripheral_onUnsubscribe(void);
-static void SimplePeripheral_drain(void);
+static void SimplePeripheral_drain(int where);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -315,9 +315,15 @@ void SimplePeripheral_unsubscribe(void)
   Event_post(syncEvent, SP_UNSUBSCRIBE_EVT);
 }
 
-void SimplePeripheral_txReady(void)
+void SimplePeripheral_readable(void)
 {
-  Event_post(syncEvent, SP_TXRDY_EVT);
+  Event_post(syncEvent, SP_READABLE_EVT);
+}
+
+void sendOutgoingMsg(OutgoingMsg_t* msg)
+{
+  List_put(&readingList, (List_Elem*)msg);
+  SimplePeripheral_readable(); // TODO
 }
 
 
@@ -402,6 +408,7 @@ static void SimplePeripheral_init(void)
   hTimer = GPTimerCC26XX_open(Board_GPTIMER0A, &params); // Board_GPTIMER0A
 
   subscriptionOn = false;
+  List_clearList(&readingList);
 }
 
 /*********************************************************************
@@ -470,14 +477,14 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         SimplePeripheral_onUnsubscribe();
       }
 
-      if (events & SP_TXRDY_EVT)
+      if (events & SP_READABLE_EVT)
       {
-        SimplePeripheral_drain();
+        SimplePeripheral_drain(0);
       }
 
       if (events & SP_HTIMER_EVT)
       {
-        SimplePeripheral_drain();
+        SimplePeripheral_drain(1);
       }
     }
   }
@@ -792,7 +799,7 @@ static void SimplePeripheral_startTimer(void)
   Types_FreqHz freq;
   BIOS_getCpuFreq(&freq);
   // GPTimerCC26XX_Value loadVal = freq.lo / 1000 - 1; //47999
-  GPTimerCC26XX_Value loadVal = freq.lo - 1;
+  GPTimerCC26XX_Value loadVal = freq.lo / 50 - 1;
   GPTimerCC26XX_setLoadValue(hTimer, loadVal);
   GPTimerCC26XX_registerInterrupt(hTimer, timerCallback, GPT_INT_TIMEOUT);
   GPTimerCC26XX_start(hTimer);
@@ -803,19 +810,23 @@ static void SimplePeripheral_stopTimer(void)
   GPTimerCC26XX_stop(hTimer);
 }
 
-static bool SimplePeripheral_doNotify(void)
+static bool SimplePeripheral_doNotify(int where)
 {
   attHandleValueNoti_t noti;
   bStatus_t status;
 
+  OutgoingMsg_t *msg = (OutgoingMsg_t*)List_head(&readingList);
+  if (!msg) return false;
+
   noti.pValue = (uint8_t*) GATT_bm_alloc(connList[0], ATT_HANDLE_VALUE_NOTI,
-                                         message.len, &noti.len);
+                                         msg->len, &noti.len);
   if (noti.pValue == NULL)
   {
+    Display_print1(dispHandle, 0xff, 0, "------ notify failed, nomem, where %d", where);
     return false;
   }
 
-  memcpy(noti.pValue, message.p, noti.len);
+  memcpy(noti.pValue, msg->data, noti.len);
   noti.handle = simpleProfileChar1ValueAttrHandle->handle;
   status = GATT_Notification(connList[0], &noti, 0);
 
@@ -825,10 +836,13 @@ static bool SimplePeripheral_doNotify(void)
    */
   if (status == SUCCESS)
   {
+    // BadpcmPacket_t *pkt = (BadpcmPacket_t*) msg->data;
+    // Display_print3(dispHandle, 0xff, 0, "------ notify success, major %d, minor %d, where %d", pkt->major, pkt->minor, where);
     return true;
   }
   else
   {
+    Display_print2(dispHandle, 0xff, 0, "------ notify failed, code %d, where %d", status, where);
     GATT_bm_free((gattMsg_t*) &noti, ATT_HANDLE_VALUE_NOTI);
     return false;
   }
@@ -844,25 +858,23 @@ static void SimplePeripheral_onUnsubscribe(void)
 {
   SimplePeripheral_stopTimer();
   subscriptionOn = false;
-  SimplePeripheral_drain();
+  SimplePeripheral_drain(2);
 }
 
-static void SimplePeripheral_drain(void)
+static void SimplePeripheral_drain(int where)
 {
   if (subscriptionOn)
   {
-    while ((message.p || Mailbox_pend(outgoingMailbox, &message, 0)) && SimplePeripheral_doNotify())
+    while (SimplePeripheral_doNotify(where))
     {
-      ICall_free(message.p);
-      message.p = 0;
+      freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
     }
   }
   else
   {
-    while (message.p || Mailbox_pend(outgoingMailbox, &message, 0))
+    while (List_head(&readingList))
     {
-      ICall_free(message.p);
-      message.p = 0;
+      freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
     }
   }
 }

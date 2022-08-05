@@ -66,7 +66,7 @@
  * CONSTANTS
  */
 
-#define SERVAPP_NUM_ATTR_SUPPORTED        1 + 4 + 3 + 3   // TODO
+#define SERVAPP_NUM_ATTR_SUPPORTED        1 + 4   // TODO
 
 /*********************************************************************
  * TYPEDEFS
@@ -79,15 +79,10 @@
 CONST uint8 simpleProfileServUUID[ATT_UUID_SIZE] = {
     SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_SERV_UUID) };
 
-// Characteristic 4 UUID: 0x9501
+// Characteristic 1 UUID: 0x9501
 CONST uint8 simpleProfileChar1UUID[ATT_UUID_SIZE] = {
     SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_CHAR1_UUID) };
 
-CONST uint8 simpleProfileChar2UUID[ATT_UUID_SIZE] = {
-    SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_CHAR2_UUID) };
-
-CONST uint8 simpleProfileChar3UUID[ATT_UUID_SIZE] = {
-    SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_CHAR3_UUID) };
 /*********************************************************************
  * EXTERNAL VARIABLES
  */
@@ -110,7 +105,7 @@ static CONST gattAttrType_t simpleProfileService = { ATT_BT_UUID_SIZE,
                                                      simpleProfileServUUID };
 
 // Simple Profile Characteristic 4 Properties
-static uint8 simpleProfileChar1Props = GATT_PROP_NOTIFY;
+static uint8 simpleProfileChar1Props = GATT_PROP_WRITE | GATT_PROP_NOTIFY;
 
 // Characteristic 4 Value
 static uint8 simpleProfileChar1 = 0;
@@ -123,18 +118,6 @@ static gattCharCfg_t *simpleProfileChar1Config;
 
 // Simple Profile Characteristic 4 User Description
 static uint8 simpleProfileChar1UserDesp[6] = "audio";
-
-static uint8 simpleProfileChar2Props = GATT_PROP_READ | GATT_PROP_WRITE;
-
-uint8 simpleProfileChar2 = 0;
-
-static uint8 simpleProfileChar2UserDesp[10] = "recording";
-
-static uint8 simpleProfileChar3Props = GATT_PROP_READ;
-
-static uint8 simpleProfileChar3[SIMPLEPROFILE_CHAR3_LEN] = { 0 };
-
-static uint8 simpleProfileChar3UserDesp[9] = "segments";
 
 /*********************************************************************
  * Profile Attributes - Table
@@ -154,7 +137,9 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] = {
       0, &simpleProfileChar1Props },
 
     // 2 Characteristic 1 Value
-    { { ATT_UUID_SIZE, simpleProfileChar1UUID }, 0, 0, &simpleProfileChar1 },
+    { { ATT_UUID_SIZE, simpleProfileChar1UUID },
+    GATT_PERMIT_WRITE,
+      0, &simpleProfileChar1 },
 
     // 3 Characteristic 1 configuration
     { { ATT_BT_UUID_SIZE, clientCharCfgUUID },
@@ -164,37 +149,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] = {
     // 4 Characteristic 1 User Description
     { { ATT_BT_UUID_SIZE, charUserDescUUID },
     GATT_PERMIT_READ,
-      0, simpleProfileChar1UserDesp },
-
-    // 5 Characteristic 2 Declaration
-    { { ATT_BT_UUID_SIZE, characterUUID },
-    GATT_PERMIT_READ,
-      0, &simpleProfileChar2Props },
-
-    // 6 Characteristic 2 Value
-    { { ATT_UUID_SIZE, simpleProfileChar2UUID },
-    GATT_PERMIT_READ | GATT_PERMIT_WRITE,
-      0, &simpleProfileChar2 },
-
-    // 7 Characteristic 2 User Description
-    { { ATT_BT_UUID_SIZE, charUserDescUUID },
-    GATT_PERMIT_READ,
-      0, simpleProfileChar2UserDesp },
-
-    // 8 Characteristic 3 Declaration
-    { { ATT_BT_UUID_SIZE, characterUUID },
-    GATT_PERMIT_READ,
-      0, &simpleProfileChar3Props },
-
-    // 9 Characteristic 3 Value
-    { { ATT_UUID_SIZE, simpleProfileChar3UUID },
-    GATT_PERMIT_READ,
-      0, simpleProfileChar3 },
-
-    // 10 Characteristic 3 User Description
-    { { ATT_BT_UUID_SIZE, charUserDescUUID },
-    GATT_PERMIT_READ,
-      0, simpleProfileChar3UserDesp }, };
+      0, simpleProfileChar1UserDesp }, };
 
 gattAttribute_t *simpleProfileChar1ValueAttrHandle = &simpleProfileAttrTbl[2];
 gattAttribute_t *simpleProfileChar1ConfigAttrHandle = &simpleProfileAttrTbl[3];
@@ -295,22 +250,6 @@ bStatus_t SimpleProfile_SetParameter(uint8 param, uint8 len, void *value)
   bStatus_t ret = SUCCESS;
   switch (param)
   {
-  case SIMPLEPROFILE_CHAR1:
-//      if ( len == SIMPLEPROFILE_CHAR1_LEN  )
-//      {
-//        VOID memcpy( simpleProfileChar1, value, SIMPLEPROFILE_CHAR1_LEN );
-//
-//        // See if Notification has been enabled
-//        GATTServApp_ProcessCharCfg( simpleProfileChar1Config, simpleProfileChar1, FALSE,
-//                                    simpleProfileAttrTbl, GATT_NUM_ATTRS( simpleProfileAttrTbl ),
-//                                    selfEntity, simpleProfile_ReadAttrCB );
-//      }
-//      else
-//      {
-//        ret = bleInvalidRange;
-//      }
-    break;
-
   default:
     ret = INVALIDPARAMETER;
     break;
@@ -378,15 +317,6 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
     uint16 uuid = BUILD_UINT16(pAttr->type.uuid[12], pAttr->type.uuid[13]);
     switch (uuid)
     {
-    case SIMPLEPROFILE_CHAR2_UUID:
-      *pLen = 1;
-      pValue[0] = *pAttr->pValue;
-      break;
-
-    case SIMPLEPROFILE_CHAR3_UUID:
-      *pLen = SIMPLEPROFILE_CHAR3_LEN;
-      VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_CHAR3_LEN);
-
     default:
       // Should never get here! (characteristics 3 and 4 do not have read permissions)
       *pLen = 0;
@@ -396,7 +326,6 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
   }
   else
   {
-    // 128-bit UUID
     *pLen = 0;
     status = ATT_ERR_INVALID_HANDLE;
   }
@@ -468,28 +397,22 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
       // Make sure it's not a blob operation
       if (offset == 0)
       {
-        void *p = ICall_malloc(len);
-        if (p) {
-          memcpy(p, pValue, len);
-          Mail_t msg = { .len = len, .p = p };
-          if (Mailbox_post(incomingMailbox, &msg, 0))
-          {
-            status = SUCCESS;
-          }
-          else
-          {
-            ICall_free(p);
-            status = ATT_ERR_INSUFFICIENT_RESOURCES;
-          }
-        }
-        else
+        if (len != 4)
         {
-          status = ATT_ERR_INSUFFICIENT_RESOURCES;
+          status = ATT_ERR_INVALID_VALUE_SIZE;
         }
       }
       else
       {
         status = ATT_ERR_ATTR_NOT_LONG;
+      }
+
+      if (status == SUCCESS)
+      {
+        if (!Mailbox_post(incomingMailbox, pValue, 0))
+        {
+          status = ATT_ERR_INSUFFICIENT_RESOURCES;
+        }
       }
       break;
 

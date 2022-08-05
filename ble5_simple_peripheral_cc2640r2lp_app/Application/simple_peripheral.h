@@ -85,7 +85,8 @@ extern void SimplePeripheral_createTask(void);
 void SimplePeripheral_subscribe(void);
 void SimplePeripheral_unsubscribe(void);
 
-void SimplePeripheral_txReady(void);
+void SimplePeripheral_readable(void);
+
 
 /*********************************************************************
 *********************************************************************/

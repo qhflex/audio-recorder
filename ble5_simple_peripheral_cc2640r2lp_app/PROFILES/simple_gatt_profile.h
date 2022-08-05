@@ -81,11 +81,9 @@ extern "C" {
 // Simple Keys Profile Services bit fields
 #define SIMPLEPROFILE_SERVICE                   0x00000001
 
-// Length of Characteristic 4 in bytes
-#define SIMPLEPROFILE_CHAR1_LEN                 1
-#define SIMPLEPROFILE_CHAR3_LEN                 2 // change to size of segments
+// Length of Characteristic 1 in bytes
+#define SIMPLEPROFILE_CHAR1_LEN                 4
 
-extern uint8_t simpleProfileChar2;                // recording
 
 /*********************************************************************
  * TYPEDEFS

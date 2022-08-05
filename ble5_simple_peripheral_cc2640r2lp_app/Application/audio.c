@@ -34,11 +34,14 @@
 #include <ti/drivers/NVS.h>
 #include <ti/drivers/nvs/NVSSPI25X.h>
 
+#include "icall.h"
+
 #include <ti/display/Display.h>
 
 #include <board.h>
 
 #include "simple_gatt_profile.h"
+#include "simple_peripheral.h"
 
 #include "audio.h"
 
@@ -87,7 +90,9 @@
 /*********************************************************************
  * CONSTANTS
  */
-#define MAGIC                             (0xD970576A)
+
+// hexdump -n 4 -e '"%08X\n"' /dev/urandom
+#define MAGIC                             (0x5A344176)
 
 #define PREAMBLE                          ((uint64_t)0x7FFF80017FFF8001)
 
@@ -114,11 +119,26 @@
 
 #define AUDIO_REC_AUTOSTOP                Event_Id_31 // used for debugging
 
-
 #define AUDIO_EVENTS                                \
   (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC | AUDIO_READ_EVT | \
    UART_TX_RDY_EVT | UART_RX_RDY_EVT | AUDIO_INCOMING_MSG | AUDIO_OUTGOING_MSG | \
    AUDIO_REC_AUTOSTOP | AUDIO_BLE_SUBSCRIBE | AUDIO_BLE_UNSUBSCRIBE )
+
+/*
+ * Incomming message is actually a uint32_t
+ *
+ *
+ * 0 - 0xFFFFFFEE Start Reading
+ *     0xFFFFFFEF Start Recording
+ *     0xFFFFFFF0 Status
+ *     0xFFFFFFF1 Stop Recording
+ *     0xFFFFFFF2 Stop Reading
+ */
+#define IM_START_READ                     (0xffffffee)
+#define IM_START_REC                      (0xffffffef)
+#define IM_STATUS                         (0xfffffff0)
+#define IM_STOP_REC                       (0xfffffff1)
+#define IM_STOP_READ                      (0xfffffff2)
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -163,10 +183,10 @@ typedef struct __attribute__ ((__packed__)) AdpcmState
 
 _Static_assert(sizeof(AdpcmState_t)==4, "wrong size of adpcm state");
 
-#define NUM_PREVS                         21
-#define NUM_TOTAL_STARTS                  22
+#define NUM_PREV_RECS                     21
+#define NUM_TOTAL_RECS                    22
 
-typedef struct WriteContext
+typedef struct ctx
 {
   /*
    * The first 256 bytes of this struct is the first chunk in sectors.
@@ -204,31 +224,49 @@ typedef struct WriteContext
    * segment starts by one cell, which means, prevs[last] = curr; the both
    * current start and current pos are assigned to current sector index.
    */
-  uint32_t prevStarts[NUM_PREVS];
-  uint32_t currStart;
-  uint32_t currPos;
-  AdpcmState_t sectAdpcmState;  // sector-wise adpcm state
+  uint32_t recordings[NUM_PREV_RECS];
+  uint32_t recStart;
+  uint32_t recPos;
+  AdpcmState_t recAdpcmStateInSect;                  // sector-wise adpcm state
+
   uint8_t adpcmBuf[ADPCMBUF_NUM][ADPCMBUF_SIZE];
-
   uint8_t pcmBuf[PCMBUF_TOTAL_SIZE];
-
-  AdpcmState_t adpcmState;
-  uint32_t adpcmCount;
-  uint32_t adpcmCountInSect;
+  AdpcmState_t recAdpcmState;
+  uint32_t recAdpcmCount;
+  uint32_t recAdpcmCountInSect;
 
   I2S_Transaction i2sTransaction[PCMBUF_NUM];
-
   List_List recordingList;
   List_List processingList;
+  bool recording;
 
-  bool finished;
-} WriteContext_t;
 
-_Static_assert(offsetof(WriteContext_t, adpcmBuf)==96,
+  uint32_t readStart;
+  uint32_t readPosMajor;
+  uint32_t readPosMinor;
+  AdpcmState_t readAdpcmState;
+
+  bool reading;
+
+  bool subscriptionOn;
+} ctx_t;
+
+_Static_assert(offsetof(ctx_t, adpcmBuf)==96,
                "wrong write context (header) layout");
 
-_Static_assert(offsetof(WriteContext_t, pcmBuf)==256,
+_Static_assert(offsetof(ctx_t, pcmBuf)==256,
                "wrong write context (header) size");
+
+typedef struct __attribute__ ((__packed__)) StatusPacket
+{
+  uint32_t flags; /* 1 << 0 recording, 1 << 1 reading */
+  uint32_t recordings[NUM_PREV_RECS];
+  uint32_t recStart;
+  uint32_t recPos;
+  uint32_t readStart;
+  uint32_t readPosMajor;
+  uint32_t readPosMinor;
+} StatusPacket_t;
 
 #ifdef LOG_ADPCM_DATA
 typedef struct __attribute__ ((__packed__)) UartPacket
@@ -245,7 +283,7 @@ typedef struct __attribute__ ((__packed__)) UartPacket
 #endif
   uint8_t cka;
   uint8_t ckb;
-}UartPacket_t;
+} UartPacket_t;
 
 #ifdef LOG_PCM_DATA
 _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + PCMBUF_SIZE + 22,
@@ -275,45 +313,39 @@ Display_Handle    dispHandle;
 
 Event_Handle audioEvent;
 Mailbox_Handle incomingMailbox;
-Mailbox_Handle outgoingMailbox;
+
+OutgoingMsg_t outmsg[1];
+
+// TODO
+static Semaphore_Handle semOutgoingMsgFreed;
+static List_List freeOutgoingMsgs;
+
 
 /*********************************************************************
  * LOCAL VARIABLES
  */
+
+/* @formatter:off */
+
 /* Table of index changes */
-const static signed char IndexTable[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1,
-                                            -1,
-                                            -1, 2, 4, 6, 8, };
+const static signed char IndexTable[16] = { -1, -1, -1, -1, 2, 4, 6, 8,
+                                            -1, -1, -1, -1, 2, 4, 6, 8, };
 
 /* Quantizer step size lookup table */
-const static int StepSizeTable[89] = { 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19,
-                                       21,
-                                       23, 25, 28, 31, 34, 37, 41, 45, 50,
-                                       55,
-                                       60, 66, 73, 80, 88, 97, 107, 118,
-                                       130,
-                                       143, 157, 173, 190, 209, 230, 253,
-                                       279,
-                                       307, 337, 371, 408, 449, 494, 544,
-                                       598,
-                                       658, 724, 796, 876, 963, 1060, 1166,
-                                       1282,
-                                       1411, 1552, 1707, 1878, 2066, 2272,
-                                       2499,
-                                       2749, 3024, 3327, 3660, 4026, 4428,
-                                       4871,
-                                       5358, 5894, 6484, 7132, 7845, 8630,
-                                       9493,
-                                       10442, 11487, 12635, 13899, 15289,
-                                       16818,
-                                       18500, 20350, 22385, 24623, 27086,
-                                       29794,
-                                       32767 };
+const static int StepSizeTable[89] = { 7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+                                       19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+                                       50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+                                       130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+                                       337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+                                       876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+                                       2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+                                       5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+                                       15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767 };
 
 /* Used for calculating bitmap for monotonic counter */
-static const uint8_t markedBytes[8] = { 0x7f, 0x3f, 0x1f, 0x0f, 0x07, 0x03,
-                                        0x01,
+static const uint8_t markedBytes[8] = { 0x7f, 0x3f, 0x1f, 0x0f, 0x07, 0x03, 0x01,
                                         0x00 };
+/* @formatter:on */
 
 /*
  * Synchronization
@@ -342,8 +374,7 @@ NVS_Attrs nvsAttrs;
 int markedBitsLo = -1;
 int markedBitsHi = -1;
 
-WriteContext_t writeContext = { };
-WriteContext_t *wctx = NULL;
+ctx_t ctx = { };
 
 #if defined (LOG_ADPCM_DATA)
 UartPacket_t uartPkt;
@@ -367,6 +398,7 @@ static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count);
 #endif
 
 static char adpcmEncoder(short sample, int16_t *prevSample, uint8_t *prevIndex);
+static short adpcmDecoder(char code, int16_t* prevSample, uint8_t *prevIndex);
 void checksum(void *p, uint32_t len, uint8_t *a, uint8_t *b);
 
 extern void simple_peripheral_spin(void);
@@ -379,7 +411,8 @@ static uint32_t readMagic(void);
 static void loadCounter(void);
 static void incrementCounter(void);
 
-static void loadPrevStarts(void);
+static void loadRecordings(void);
+static void sendStatus(void);
 
 static void startRecording(void);
 static void stopRecording(void);
@@ -392,6 +425,12 @@ void Audio_subscribe(void)
 void Audio_unsubscribe(void)
 {
   Event_post(audioEvent, AUDIO_BLE_UNSUBSCRIBE);
+}
+
+void freeOutgoingMsg(OutgoingMsg_t *msg)
+{
+  List_put(&freeOutgoingMsgs, (List_Elem*)msg);
+  Semaphore_post(semOutgoingMsgFreed);
 }
 
 /*********************************************************************
@@ -435,12 +474,16 @@ static void Audio_init(void)
   Mailbox_Params_init(&mboxParams);
   mboxParams.readerEvent = audioEvent;
   mboxParams.readerEventId = AUDIO_INCOMING_MSG;
-  incomingMailbox = Mailbox_create(sizeof(Mail_t), 2, &mboxParams, Error_IGNORE);
+  incomingMailbox = Mailbox_create(sizeof(uint32_t), 4, &mboxParams, Error_IGNORE);
 
-  Mailbox_Params_init(&mboxParams);
-  mboxParams.writerEvent = audioEvent;
-  mboxParams.writerEventId = AUDIO_OUTGOING_MSG;
-  outgoingMailbox = Mailbox_create(sizeof(Mail_t), 2, &mboxParams, Error_IGNORE);
+  Semaphore_Params_init(&semParams);
+  semParams.event = audioEvent;
+  semParams.eventId = AUDIO_OUTGOING_MSG;
+  semOutgoingMsgFreed = Semaphore_create(1, &semParams, Error_IGNORE);
+
+  List_clearList(&freeOutgoingMsgs);
+  List_put(&freeOutgoingMsgs, (List_Elem*)&outmsg[0]);
+  // List_put(&freeOutgoingMsgs, (List_Elem*)&outmsg[1]);
 
 #if defined (LOG_ADPCM_DATA)
   Semaphore_Params_init(&semParams);
@@ -498,18 +541,18 @@ static void Audio_taskFxn(UArg a0, UArg a1)
   Display_print2(dispHandle, 0xff, 0, "monotonic counter loaded, %d (%08x)",
                  MONOTONIC_COUNTER, MONOTONIC_COUNTER);
 
-  loadPrevStarts();
+  loadRecordings();
   Display_print0(dispHandle, 0xff, 0, "prevs loaded");
 
 #ifndef Display_DISABLE_ALL
-  for (int i = 0; i < NUM_PREVS + 2; i++)
+  for (int i = 0; i < NUM_PREV_RECS + 2; i++)
   {
-    uint32_t x = writeContext.prevStarts[i];
-    if (i < NUM_PREVS)
+    uint32_t x = ctx.recordings[i];
+    if (i < NUM_PREV_RECS)
     {
       Display_print2(dispHandle, 0xff, 0, "      %d (0x%08x)", x, x);
     }
-    else if (i == NUM_PREVS)
+    else if (i == NUM_PREV_RECS)
     {
       Display_print2(dispHandle, 0xff, 0, "start %d (0x%08x)", x, x);
     }
@@ -541,37 +584,37 @@ static void Audio_taskFxn(UArg a0, UArg a1)
     if (event & AUDIO_PCM_EVT)
     {
       Semaphore_pend(semDataReadyForTreatment, BIOS_NO_WAIT);
-      if (!wctx->finished)
+      if (ctx.recording)
       {
         I2S_Transaction *ttt = (I2S_Transaction*) List_get(
-            &wctx->processingList);
+            &ctx.processingList);
         if (ttt != NULL)
         {
 #ifdef LOG_ADPCM_DATA
           /* save a copy */
-          int16_t uartPrevSample = wctx->adpcmState.sample;
-          uint8_t uartPrevIndex = wctx->adpcmState.index;
+          int16_t uartPrevSample = ctx.recAdpcmState.sample;
+          uint8_t uartPrevIndex = ctx.recAdpcmState.index;
 #endif
-          uint16_t adpcmInUse = wctx->adpcmCount % ADPCMBUF_NUM;
+          uint16_t adpcmInUse = ctx.recAdpcmCount % ADPCMBUF_NUM;
           int16_t *samples = (int16_t*) ttt->bufPtr;
           for (int i = 0; i < PCM_SAMPLES_PER_BUF; i++)
           {
-            uint8_t code = adpcmEncoder(samples[i], &wctx->adpcmState.sample,
-                                        &wctx->adpcmState.index);
+            uint8_t code = adpcmEncoder(samples[i], &ctx.recAdpcmState.sample,
+                                        &ctx.recAdpcmState.index);
             if (i % 2 == 0)
             {
-              wctx->adpcmBuf[adpcmInUse][i / 2] = code;
+              ctx.adpcmBuf[adpcmInUse][i / 2] = code;
             }
             else
             {
-              wctx->adpcmBuf[adpcmInUse][i / 2] |= (code << 4);
+              ctx.adpcmBuf[adpcmInUse][i / 2] |= (code << 4);
             }
           }
 #ifdef LOG_ADPCM_DATA
           Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);
           uartPkt.preamble = PREAMBLE;
-          uartPkt.startSect = wctx->currStart;
-          uartPkt.index = wctx->adpcmCount;
+          uartPkt.startSect = ctx.recStart;
+          uartPkt.index = ctx.recAdpcmCount;
           uartPkt.prevSample = uartPrevSample;
           uartPkt.prevIndex = uartPrevIndex;
 #ifdef LOG_PCM_DATA
@@ -580,107 +623,268 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 #else
           uartPkt.dummy = 0;
 #endif
-          memcpy(uartPkt.adpcm, wctx->adpcmBuf[adpcmInUse], ADPCMBUF_SIZE);
+          memcpy(uartPkt.adpcm, ctx.adpcmBuf[adpcmInUse], ADPCMBUF_SIZE);
           checksum(&uartPkt.startSect,
                    offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, startSect),
                    &uartPkt.cka, &uartPkt.ckb);
           UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
 #endif
-          List_put(&wctx->recordingList, (List_Elem*) ttt);
+          List_put(&ctx.recordingList, (List_Elem*) ttt);
 
           if (adpcmInUse == ADPCMBUF_NUM - 1)
           {
-            if (wctx->adpcmCountInSect == adpcmInUse)
+            if (ctx.recAdpcmCountInSect == adpcmInUse)
             {
               // uint32_t bufCount = 0;
-              size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE;
+              size_t offset = (ctx.recPos % DATA_SECT_COUNT) * SECT_SIZE;
               size_t size = 96 + ADPCMBUF_SIZE * ADPCMBUF_NUM;
-              NVS_write(nvsHandle, offset, wctx, size, 0); // NVS_WRITE_POST_VERIFY);
+              NVS_write(nvsHandle, offset, &ctx, size, 0); // NVS_WRITE_POST_VERIFY);
 
               Display_print5(
                   dispHandle, 0xff, 0,
                   "nvs write, pos %06d, cnt %06d, cntInSect %02d, offset %08d (rem4k %04d), size 256",
-                  wctx->currPos,
-                  wctx->adpcmCount,
-                  wctx->adpcmCountInSect, offset, offset % 4096);
+                  ctx.recPos,
+                  ctx.recAdpcmCount,
+                  ctx.recAdpcmCountInSect, offset, offset % 4096);
             }
             else
             {
-              uint32_t writtenBufCount = wctx->adpcmCountInSect / ADPCMBUF_NUM
+              uint32_t writtenBufCount = ctx.recAdpcmCountInSect / ADPCMBUF_NUM
                   * ADPCMBUF_NUM;
-              size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE + 96
+              size_t offset = (ctx.recPos % DATA_SECT_COUNT) * SECT_SIZE + 96
                   + writtenBufCount * ADPCMBUF_SIZE;
               size_t size = ADPCMBUF_SIZE * ADPCMBUF_NUM;
-              NVS_write(nvsHandle, offset, &wctx->adpcmBuf[0], size, 0); // NVS_WRITE_POST_VERIFY);
+              NVS_write(nvsHandle, offset, &ctx.adpcmBuf[0], size, 0); // NVS_WRITE_POST_VERIFY);
 
               Display_print5(
                   dispHandle, 0xff, 0,
                   "nvs write, pos %06d, cnt %06d, cntInSect %02d, offset %08d (rem4k %04d), size 160",
-                  wctx->currPos,
-                  wctx->adpcmCount,
-                  wctx->adpcmCountInSect, offset, offset % 4096);
+                  ctx.recPos,
+                  ctx.recAdpcmCount,
+                  ctx.recAdpcmCountInSect, offset, offset % 4096);
             }
           }
 
-          wctx->adpcmCount++;
-          wctx->adpcmCountInSect = wctx->adpcmCount % ADPCM_BUF_COUNT_PER_SECT;
+          ctx.recAdpcmCount++;
+          ctx.recAdpcmCountInSect = ctx.recAdpcmCount % ADPCM_BUF_COUNT_PER_SECT;
 
           // This generates too much output
           //        Display_print2(dispHandle, 0xff, 0, "-- cnt %d, cntInSect %d",
-          //                       wctx->adpcmCount, wctx->adpcmCountInSect);
+          //                       ctx.adpcmCount, ctx.adpcmCountInSect);
 
           // last adpcm buf in sect
-          if (wctx->adpcmCountInSect == 0)
+          if (ctx.recAdpcmCountInSect == 0)
           {
-            wctx->currPos++;
-            wctx->sectAdpcmState = wctx->adpcmState;
+            ctx.recPos++;
+            ctx.recAdpcmStateInSect = ctx.recAdpcmState;
             incrementCounter();
 
 //            Display_print4(dispHandle, 0xff, 0,
 //                           "increment sect, pos: %d (%08x), counter %d (%08x)",
-//                           wctx->currPos, wctx->currPos, MONOTONIC_COUNTER,
+//                           ctx.currPos, ctx.currPos, MONOTONIC_COUNTER,
 //                           MONOTONIC_COUNTER);
 
-            Display_print2(dispHandle, 0xff, 0, "start %d (0x%08x)", wctx->currStart, wctx->currStart);
-            Display_print2(dispHandle, 0xff, 0, "pos   %d (0x%08x)", wctx->currPos, wctx->currPos);
+            Display_print2(dispHandle, 0xff, 0, "start %d (0x%08x)", ctx.recStart, ctx.recStart);
+            Display_print2(dispHandle, 0xff, 0, "pos   %d (0x%08x)", ctx.recPos, ctx.recPos);
             Display_print2(dispHandle, 0xff, 0, "count %d (0x%08x)", MONOTONIC_COUNTER, MONOTONIC_COUNTER);
 
             /* it is important to do this here */
-            size_t offset = (wctx->currPos % DATA_SECT_COUNT) * SECT_SIZE;
+            size_t offset = (ctx.recPos % DATA_SECT_COUNT) * SECT_SIZE;
             NVS_erase(nvsHandle, offset, SECT_SIZE);
 
             Display_print3(dispHandle, 0xff, 0,
                            "nvs erase, offset %08d (0x%08x) (rem4k %d)", offset,
                            offset, offset % 4096);
 
-            if (wctx->currPos - wctx->currStart == MAX_RECORDING_SECTORS)
+            if (ctx.recPos - ctx.recStart == MAX_RECORDING_SECTORS)
             {
               Display_print2(
                   dispHandle,
                   0xff,
                   0,
                   "max rec sect reached, before stopRecording(). start %d, pos %d",
-                  wctx->currStart, wctx->currPos);
+                  ctx.recStart, ctx.recPos);
               stopRecording();
               Display_print2(
                   dispHandle,
                   0xff,
                   0,
                   "max rec sect reached, after  stopRecording(). start %d, pos %d",
-                  wctx->currStart, wctx->currPos);
+                  ctx.recStart, ctx.recPos);
 
               Event_post(audioEvent, AUDIO_REC_AUTOSTOP);
             }
           }
         } /* end of if ttt != NULL */
-      } /* end of if wctx */
+      } /* end of if ctx */
     } /* end of AUDIO PCM EVENT */
+
+    if (event & AUDIO_BLE_SUBSCRIBE)
+    {
+      ctx.subscriptionOn = true;
+      Display_print0(dispHandle, 0xff, 0, "subscription on ");
+    }
+
+    if (event & AUDIO_BLE_UNSUBSCRIBE)
+    {
+      ctx.subscriptionOn = false;
+      if (ctx.reading)
+      {
+        ctx.reading = false;
+        Display_print0(dispHandle, 0xff, 0, "subscription off and stop reading");
+      }
+      else
+      {
+        Display_print0(dispHandle, 0xff, 0, "subscription off");
+      }
+    }
+
+    if (event & AUDIO_OUTGOING_MSG)
+    {
+      Semaphore_pend(semOutgoingMsgFreed, 0);
+    }
+
+    if (ctx.subscriptionOn)
+    {
+      /* when space available */
+      while (List_head(&freeOutgoingMsgs))
+      {
+        if (Mailbox_getNumPendingMsgs(incomingMailbox))
+        {
+          uint32_t msg;
+          Mailbox_pend(incomingMailbox, &msg, 0);
+
+          Display_print2(dispHandle, 0xff, 0, "incoming msg %d (%08x)", msg, msg);
+
+          if (msg <= IM_START_READ)
+          {
+            Display_print0(dispHandle, 0xff, 0, "start reading");
+            ctx.readStart = msg;
+            ctx.readPosMajor  = msg;
+            ctx.readPosMinor = 0;
+            ctx.reading = true;
+          }
+          else if (msg == IM_START_REC)
+          {
+            Display_print0(dispHandle, 0xff, 0, "start recording");
+            startRecording();
+          }
+          else if (msg == IM_STATUS)
+          {
+            // Do nothing
+          }
+          else if (msg == IM_STOP_REC)
+          {
+            Display_print0(dispHandle, 0xff, 0, "stop recording");
+            stopRecording();
+          }
+          else if (msg == IM_STOP_READ)
+          {
+            Display_print0(dispHandle, 0xff, 0, "stop reading");
+            ctx.reading = false;
+          }
+
+          sendStatus();
+        }
+        else if (ctx.reading)
+        {
+          if (ctx.readPosMajor >= ctx.recPos)
+          {
+            if (!ctx.recording)
+            {
+              Display_print0(dispHandle, 0xff, 0, "stop reading forward when recording stopped ");
+              ctx.reading = false;
+              sendStatus();
+            }
+            break;
+          }
+
+          /*
+           * in-range means:
+           * upper bound: readPosMajor < recPos
+           * lower bound: readPosMajor + DATA_SECT_COUNT > recPos
+           */
+          if (!(ctx.readPosMajor + DATA_SECT_COUNT > ctx.recPos))
+          {
+            // adjusted
+            uint32_t major = ctx.recPos - DATA_SECT_COUNT + 1;
+
+            Display_print2(dispHandle, 0xff, 0, "read major %d adjusted to %d",
+                           ctx.readPosMajor, major);
+
+            ctx.readPosMajor = major;
+            ctx.readPosMinor = 0;
+          }
+
+          OutgoingMsg_t *outmsg = (OutgoingMsg_t*) List_get(&freeOutgoingMsgs);
+          BadpcmPacket_t* bap = (BadpcmPacket_t*)&outmsg->data[0];
+          if (ctx.readPosMinor == 0)
+          {
+            size_t offset = (ctx.readPosMajor % DATA_SECT_COUNT) * SECT_SIZE + 92;
+
+            Display_print5(
+                dispHandle, 0xff, 0,
+                "read offset %d (%08x) @ major %d (%08x) minor %d", offset,
+                offset, ctx.readPosMajor, ctx.readPosMajor, ctx.readPosMinor);
+
+            NVS_read(nvsHandle, offset, &outmsg->data[4], 204);
+            ctx.readAdpcmState = *((AdpcmState_t*)&outmsg->data[4]);
+          }
+          else
+          {
+            size_t offset = (ctx.readPosMajor % DATA_SECT_COUNT) * SECT_SIZE + 96 + ctx.readPosMinor * 200;
+
+            Display_print5(
+                dispHandle, 0xff, 0,
+                "read offset %d (%08x) @ major %d (%08x) minor %d", offset,
+                offset, ctx.readPosMajor, ctx.readPosMajor, ctx.readPosMinor);
+
+            NVS_read(nvsHandle, offset, &bap->data[0], 200);
+          }
+
+          bap->major = ctx.readPosMajor;
+          bap->minor = ctx.readPosMinor;
+          bap->index = ctx.readAdpcmState.index;
+          bap->sample = ctx.readAdpcmState.sample;
+          for (int i = 0; i < 200; i++)
+          {
+            char x = bap->data[i];
+            adpcmDecoder(x & 0x0f, &ctx.readAdpcmState.sample, &ctx.readAdpcmState.index);
+            adpcmDecoder((x >> 4) & 0x0f, &ctx.readAdpcmState.sample, &ctx.readAdpcmState.index);
+          }
+          outmsg->len = sizeof(BadpcmPacket_t);
+          sendOutgoingMsg(outmsg);
+
+          ctx.readPosMinor++;
+          if (ctx.readPosMinor == 20)
+          {
+            ctx.readPosMajor++;
+            ctx.readPosMinor = 0;
+          }
+        }
+        else
+        {
+          break;  // no incoming message, no read operation wip
+        }
+      }
+    }
+    else
+    {
+      if (Mailbox_getNumPendingMsgs(incomingMailbox))
+      {
+        uint32_t msg;
+        while (Mailbox_pend(incomingMailbox, &msg, 0))
+        {
+          Display_print2(dispHandle, 0xff, 0, "incoming msg %d (%08x) discarded", msg, msg);
+        }
+      }
+    }
 
 #if defined(LOG_ADPCM_DATA) && defined (LOG_NVS_AFTER_AUTOSTOP)
     if (event & AUDIO_REC_AUTOSTOP)
     {
-      uint32_t start = writeContext.prevStarts[NUM_PREVS - 1];
-      uint32_t end = writeContext.currStart;
+      uint32_t start = ctx.recordings[NUM_PREV_RECS - 1];
+      uint32_t end = ctx.recStart;
       for (uint32_t pos = start; pos != end; pos++)
       {
         for (int i = 0; i < 100; i++)
@@ -692,14 +896,14 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           if (i == 0)
           {
             size_t offset = pos % DATA_SECT_COUNT * SECT_SIZE
-                + offsetof(WriteContext_t, sectAdpcmState);
+                + offsetof(ctx_t, recAdpcmStateInSect);
             NVS_read(nvsHandle, offset, &uartPkt.prevSample, 40 + 4);
             uartPkt.dummy = 0;
           }
           else
           {
             size_t offset = pos % DATA_SECT_COUNT * SECT_SIZE
-                + offsetof(WriteContext_t, adpcmBuf)
+                + offsetof(ctx_t, adpcmBuf)
                 + i * 40;
             NVS_read(nvsHandle, offset, &uartPkt.adpcm[0], 40);
             uartPkt.prevSample = 0;
@@ -723,39 +927,35 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
 static void startRecording(void)
 {
-  if (!wctx->finished)
+  if (ctx.recording)
     return;
 
-  simpleProfileChar2 = 1;
+  ctx.recStart = MONOTONIC_COUNTER;
+  ctx.recPos = ctx.recStart;
+  ctx.recAdpcmState.sample = 0;
+  ctx.recAdpcmState.index = 0;
+  ctx.recAdpcmState.dummy = 0;
+  ctx.recAdpcmStateInSect = ctx.recAdpcmState;
+  ctx.recAdpcmCount = 0;
+  ctx.recAdpcmCountInSect = 0;
 
-  wctx = &writeContext; // is here the right place? TODO
-
-  wctx->currStart = MONOTONIC_COUNTER;
-  wctx->currPos = wctx->currStart;
-  wctx->adpcmState.sample = 0;
-  wctx->adpcmState.index = 0;
-  wctx->adpcmState.dummy = 0;
-  wctx->sectAdpcmState = wctx->adpcmState;
-  wctx->adpcmCount = 0;
-  wctx->adpcmCountInSect = 0;
-
-  wctx->finished = false;
+  ctx.recording = true;
 
   /** ahead of writing erasure */
-  size_t offset = wctx->currPos % DATA_SECT_COUNT * SECT_SIZE;
+  size_t offset = ctx.recPos % DATA_SECT_COUNT * SECT_SIZE;
   NVS_erase(nvsHandle, offset, SECT_SIZE);
 
   Task_sleep(10 * 1000 / Clock_tickPeriod);
 
-  List_clearList(&wctx->recordingList);
-  List_clearList(&wctx->processingList);
+  List_clearList(&ctx.recordingList);
+  List_clearList(&ctx.processingList);
 
   for (int k = 0; k < PCMBUF_NUM; k++)
   {
-    I2S_Transaction_init(&wctx->i2sTransaction[k]);
-    wctx->i2sTransaction[k].bufPtr = &wctx->pcmBuf[k * PCMBUF_SIZE];
-    wctx->i2sTransaction[k].bufSize = PCMBUF_SIZE;
-    List_put(&wctx->recordingList, (List_Elem*) &wctx->i2sTransaction[k]);
+    I2S_Transaction_init(&ctx.i2sTransaction[k]);
+    ctx.i2sTransaction[k].bufPtr = &ctx.pcmBuf[k * PCMBUF_SIZE];
+    ctx.i2sTransaction[k].bufSize = PCMBUF_SIZE;
+    List_put(&ctx.recordingList, (List_Elem*) &ctx.i2sTransaction[k]);
   }
 
   /*
@@ -798,7 +998,7 @@ static void startRecording(void)
 
   i2sHandle = I2S_open(Board_I2S0, &i2sParams);
   I2S_setReadQueueHead(i2sHandle,
-                       (I2S_Transaction*) List_head(&wctx->recordingList));
+                       (I2S_Transaction*) List_head(&ctx.recordingList));
 
   /*
    * Start I2S streaming
@@ -809,7 +1009,7 @@ static void startRecording(void)
 
 static void stopRecording(void)
 {
-  if (wctx->finished)
+  if (!ctx.recording)
     return;
 
   if (i2sHandle)
@@ -819,14 +1019,12 @@ static void stopRecording(void)
     I2S_close(i2sHandle);
   }
 
-  for (int i = 0; i < NUM_PREVS; i++)
+  for (int i = 0; i < NUM_PREV_RECS; i++)
   {
-    wctx->prevStarts[i] = wctx->prevStarts[i + 1];
+    ctx.recordings[i] = ctx.recordings[i + 1];
   }
-  wctx->currStart = wctx->currPos;
-  wctx->finished = true;
-
-  simpleProfileChar2 = 0;
+  ctx.recStart = ctx.recPos;
+  ctx.recording = false;
 }
 
 static void errCallbackFxn(I2S_Handle handle, int_fast16_t status,
@@ -854,8 +1052,8 @@ static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
   {
 
     /* The finished transaction contains data that must be treated */
-    List_remove(&wctx->recordingList, (List_Elem*) transactionFinished);
-    List_put(&wctx->processingList, (List_Elem*) transactionFinished);
+    List_remove(&ctx.recordingList, (List_Elem*) transactionFinished);
+    List_put(&ctx.processingList, (List_Elem*) transactionFinished);
 
     /* Start the treatment of the data */
     Semaphore_post(semDataReadyForTreatment);
@@ -947,6 +1145,62 @@ static char adpcmEncoder(short sample, int16_t *prevSample, uint8_t *prevIndex)
 
   /* Return the new ADPCM code */
   return (code & 0x0f);
+}
+
+static short adpcmDecoder(char code, int16_t* prevSample, uint8_t *prevIndex)
+{
+  int predsample;
+  int index;
+  int step;
+  int diffq;
+
+  /* Restore previous values of predicted sample and quantizer step
+   size index
+   */
+  predsample = *prevSample;
+  index = *prevIndex;
+  /* Find quantizer step size from lookup table using index
+   */
+  step = StepSizeTable[index];
+  /* Inverse quantize the ADPCM code into a difference using the
+   quantizer step size
+   */
+  diffq = step >> 3;
+  if (code & 4)
+    diffq += step;
+  if (code & 2)
+    diffq += step >> 1;
+  if (code & 1)
+    diffq += step >> 2;
+  /* Add the difference to the predicted sample
+   */
+  if (code & 8)
+    predsample -= diffq;
+  else
+    predsample += diffq;
+  /* Check for overflow of the new predicted sample
+   */
+  if (predsample > 32767)
+    predsample = 32767;
+  else if (predsample < -32768)
+    predsample = -32768;
+  /* Find new quantizer step size by adding the old index and a
+   table lookup using the ADPCM code
+   */
+  index += IndexTable[code];
+  /* Check for overflow of the new quantizer step size index
+   */
+  if (index < 0)
+    index = 0;
+  if (index > 88)
+    index = 88;
+  /* Save predicted sample and quantizer step size index for next
+   iteration
+   */
+  *prevSample = predsample;
+  *prevIndex = index;
+  /* Return the new speech sample */
+  return (int16_t)(predsample);
 }
 
 /*
@@ -1106,24 +1360,40 @@ static void incrementCounter(void)
  * @fn loadPrevStarts
  *
  */
-static void loadPrevStarts(void)
+static void loadRecordings(void)
 {
   uint32_t counter = MONOTONIC_COUNTER;
   if (counter == 0)
   {
-    for (int i = 0; i < NUM_PREVS; i++)
+    for (int i = 0; i < NUM_PREV_RECS; i++)
     {
-      writeContext.prevStarts[i] = 0xFFFFFFFF;
+      ctx.recordings[i] = 0xFFFFFFFF;
     }
   }
   else
   {
     // skip earlist one
     size_t offset = (counter - 1) % DATA_SECT_COUNT * SECT_SIZE + 4;
-    NVS_read(nvsHandle, offset, &writeContext, sizeof(uint32_t) * NUM_PREVS);
+    NVS_read(nvsHandle, offset, &ctx, sizeof(uint32_t) * NUM_PREV_RECS);
   }
 
-  writeContext.currStart = counter;
-  writeContext.currPos = counter;
+  ctx.recStart = counter;
+  ctx.recPos = counter;
+}
+
+static void sendStatus(void)
+{
+  OutgoingMsg_t *outmsg = (OutgoingMsg_t*) List_get(&freeOutgoingMsgs);
+  StatusPacket_t *status = (StatusPacket_t*) outmsg->data;
+  memcpy(status->recordings, &ctx.recordings,
+         sizeof(uint32_t) * NUM_PREV_RECS);
+  status->recStart = ctx.recStart;
+  status->recPos = ctx.recPos;
+  status->readStart = ctx.readStart;
+  status->readPosMajor = ctx.readPosMajor;
+  status->readPosMinor = ctx.readPosMinor;
+  status->flags = ctx.recording ? 1 : 0 + ctx.reading ? 2 : 0;
+  outmsg->len = sizeof(StatusPacket_t);
+  sendOutgoingMsg(outmsg);
 }
 
