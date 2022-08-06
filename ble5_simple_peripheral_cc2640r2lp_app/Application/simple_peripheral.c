@@ -836,6 +836,9 @@ static bool SimplePeripheral_doNotify(int where)
   case OMT_BADPCM:
     len = sizeof(BadpcmPacket_t);
     break;
+  default:
+    len = 0;
+    break;
   }
 
   noti.pValue = (uint8_t*) GATT_bm_alloc(connList[0], ATT_HANDLE_VALUE_NOTI,

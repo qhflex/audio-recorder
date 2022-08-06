@@ -134,11 +134,11 @@
  *     0xFFFFFFF1 Stop Recording
  *     0xFFFFFFF2 Stop Reading
  */
-#define IM_START_READ                     (0xffffffee)
-#define IM_START_REC                      (0xffffffef)
-#define IM_STATUS                         (0xfffffff0)
-#define IM_STOP_REC                       (0xfffffff1)
-#define IM_STOP_READ                      (0xfffffff2)
+#define IM_START_READ                     (0xfffffffb)
+#define IM_STOP_READ                      (0xfffffffc)    //  -4
+#define IM_START_REC                      (0xfffffffd)    //  -3
+#define IM_STOP_REC                       (0xfffffffe)    //  -2
+#define IM_STATUS                         (0xffffffff)    //  -1
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -279,6 +279,20 @@ _Static_assert(sizeof(UartPacket_t)== ADPCMBUF_SIZE + 22,
 #endif
 #endif
 
+#ifdef LOG_BADPCM_DATA
+typedef struct __attribute__ ((__packed__)) UartPacket
+{
+  uint64_t preamble;
+  OutgoingMsgType type;
+  union {
+    BadpcmPacket_t bad;
+    StatusPacket_t status;
+  };
+  uint8_t cka;
+  uint8_t ckb;
+} UartPacket_t;
+#endif
+
 /*********************************************************************
  * GLOBAL VARIABLES
  */
@@ -338,7 +352,7 @@ static const uint8_t markedBytes[8] = { 0x7f, 0x3f, 0x1f, 0x0f, 0x07, 0x03, 0x01
 
 static Semaphore_Handle semDataReadyForTreatment = NULL;
 
-#if defined (LOG_ADPCM_DATA)
+#if defined (LOG_ADPCM_DATA) || defined (LOG_BADPCM_DATA)
 static Semaphore_Handle semUartTxReady = NULL;
 #endif
 
@@ -361,7 +375,7 @@ int markedBitsHi = -1;
 
 ctx_t ctx = { };
 
-#if defined (LOG_ADPCM_DATA)
+#if defined (LOG_ADPCM_DATA) || defined (LOG_BADPCM_DATA)
 UartPacket_t uartPkt;
 #endif
 
@@ -378,7 +392,7 @@ static void errCallbackFxn(I2S_Handle handle, int_fast16_t status,
 static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
                             I2S_Transaction *transactionPtr);
 
-#if defined (LOG_ADPCM_DATA)
+#if defined (LOG_ADPCM_DATA) || defined (LOG_BADPCM_DATA)
 static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count);
 #endif
 
@@ -397,7 +411,7 @@ static void loadCounter(void);
 static void incrementCounter(void);
 
 static void loadRecordings(void);
-static void sendStatus(void);
+static void sendStatusMsg(void);
 
 static void startRecording(void);
 static void stopRecording(void);
@@ -470,7 +484,7 @@ static void Audio_init(void)
   List_put(&freeOutgoingMsgs, (List_Elem*)&outmsg[0]);
   // List_put(&freeOutgoingMsgs, (List_Elem*)&outmsg[1]);
 
-#if defined (LOG_ADPCM_DATA)
+#if defined (LOG_ADPCM_DATA) || defined (LOG_BADPCM_DATA)
   Semaphore_Params_init(&semParams);
 //  semParams.event = audioEvent;
 //  semParams.eventId = UART_TX_RDY_EVT;
@@ -754,10 +768,6 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             Display_print0(dispHandle, 0xff, 0, "start recording");
             startRecording();
           }
-          else if (msg == IM_STATUS)
-          {
-            // Do nothing
-          }
           else if (msg == IM_STOP_REC)
           {
             Display_print0(dispHandle, 0xff, 0, "stop recording");
@@ -769,7 +779,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             ctx.reading = false;
           }
 
-          sendStatus();
+          sendStatusMsg();
         }
         else if (ctx.reading)
         {
@@ -779,7 +789,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             {
               Display_print0(dispHandle, 0xff, 0, "stop reading forward when recording stopped ");
               ctx.reading = false;
-              sendStatus();
+              sendStatusMsg();
             }
             break;
           }
@@ -809,7 +819,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             NVS_read(nvsHandle, offset, &ctx.readAdpcmState, sizeof(AdpcmState_t));
           }
 
-          size_t offset = (ctx.readPosMajor % DATA_SECT_COUNT) * SECT_SIZE + 96 + ctx.readPosMinor * BADPCM_DATA_SIZE;
+          size_t offset = (ctx.readPosMajor % DATA_SECT_COUNT) * SECT_SIZE + 96
+              + ctx.readPosMinor * BADPCM_DATA_SIZE;
 
           Display_print5(
               dispHandle, 0xff, 0,
@@ -831,8 +842,22 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             adpcmDecoder((x >> 4) & 0x0f, &ctx.readAdpcmState.sample, &ctx.readAdpcmState.index);
           }
 
-          // outmsg->len = sizeof(BadpcmPacket_t);
           outmsg->type = OMT_BADPCM;
+
+#ifdef LOG_BADPCM_DATA
+          Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);
+          memset(&uartPkt, 0, sizeof(uartPkt));
+          uartPkt.preamble = PREAMBLE;
+          uartPkt.type = outmsg->type;
+          uartPkt.bad = outmsg->bad;
+
+          checksum(&uartPkt.type,
+                   offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, type),
+                   &uartPkt.cka, &uartPkt.ckb);
+
+          UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
+#endif
+
           sendOutgoingMsg(outmsg);
 
           ctx.readPosMinor++;
@@ -1040,7 +1065,7 @@ static void readCallbackFxn(I2S_Handle handle, int_fast16_t status,
   }
 }
 
-#if defined (LOG_ADPCM_DATA)
+#if defined (LOG_ADPCM_DATA) || defined (LOG_BADPCM_DATA)
 static void uartWriteCallbackFxn(UART_Handle handle, void *buf, size_t count)
 {
   Semaphore_post(semUartTxReady);
@@ -1361,7 +1386,7 @@ static void loadRecordings(void)
   ctx.recPos = counter;
 }
 
-static void sendStatus(void)
+static void sendStatusMsg(void)
 {
   OutgoingMsg_t *outmsg = (OutgoingMsg_t*) List_get(&freeOutgoingMsgs);
 
@@ -1373,8 +1398,23 @@ static void sendStatus(void)
   outmsg->status.readPosMajor = ctx.readPosMajor;
   outmsg->status.readPosMinor = ctx.readPosMinor;
   outmsg->status.flags = ctx.recording ? 1 : 0 + ctx.reading ? 2 : 0;
-  // outmsg->len = sizeof(StatusPacket_t);
+
   outmsg->type = OMT_STATUS;
+
+#ifdef LOG_BADPCM_DATA
+  Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);
+  memset(&uartPkt, 0, sizeof(uartPkt));
+  uartPkt.preamble = PREAMBLE;
+  uartPkt.type = outmsg->type;
+  uartPkt.bad = outmsg->bad;
+
+  checksum(&uartPkt.type,
+           offsetof(UartPacket_t, cka) - offsetof(UartPacket_t, type),
+           &uartPkt.cka, &uartPkt.ckb);
+
+  UART_write(uartHandle, &uartPkt, sizeof(uartPkt));
+#endif
+
   sendOutgoingMsg(outmsg);
 }
 

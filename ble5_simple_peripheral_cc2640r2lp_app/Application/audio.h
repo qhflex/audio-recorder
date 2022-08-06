@@ -49,6 +49,8 @@ typedef struct __attribute__ ((__packed__)) BadpcmPacket
 
 } BadpcmPacket_t;
 
+_Static_assert(sizeof(BadpcmPacket_t)==BADPCM_DATA_SIZE + 8, "wrong badcpm packet size");
+
 typedef struct __attribute__ ((__packed__)) StatusPacket
 {
   uint32_t flags; /* 1 << 0 recording, 1 << 1 reading */
@@ -60,29 +62,22 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
   uint32_t readPosMinor;
 } StatusPacket_t;
 
-enum OutgoingMsgType
-{
-  OMT_STATUS = 0,
-  OMT_BADPCM,
-};
+_Static_assert(sizeof(StatusPacket_t)==108, "wrong status packet size");
+
+#define OMT_STATUS                (0)
+#define OMT_BADPCM                (1)
+
+typedef uint32_t OutgoingMsgType;
 
 typedef struct __attribute__ ((__packed__)) OutgoingMsg
 {
   List_Elem listElem;
-  // size_t len;
-#ifdef LOG_BADPCM_DATA
-  uint64_t preamble;
-#endif
-  union {
+  OutgoingMsgType type;     // +   4 = 12
+  union {                   // + 168 = 180
     uint8_t raw[0];
     BadpcmPacket_t bad;
     StatusPacket_t status;
   };
-#ifdef LOG_BADPCM_DATA
-  uint8_t cka;
-  uint8_t ckb;
-#endif
-  enum OutgoingMsgType type;
 } OutgoingMsg_t;
 
 void sendOutgoingMsg(OutgoingMsg_t *msg);
