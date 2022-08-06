@@ -172,8 +172,6 @@
 #define ADPCM_SIZE_PER_SECT               4000
 #define ADPCM_BUF_COUNT_PER_SECT          (ADPCM_SIZE_PER_SECT / ADPCMBUF_SIZE)
 
-#define SEGMENT_NUM                       20
-
 typedef struct __attribute__ ((__packed__)) AdpcmState
 {
   int16_t sample;
@@ -183,8 +181,7 @@ typedef struct __attribute__ ((__packed__)) AdpcmState
 
 _Static_assert(sizeof(AdpcmState_t)==4, "wrong size of adpcm state");
 
-#define NUM_PREV_RECS                     21
-#define NUM_TOTAL_RECS                    22
+
 
 typedef struct ctx
 {
@@ -240,7 +237,6 @@ typedef struct ctx
   List_List processingList;
   bool recording;
 
-
   uint32_t readStart;
   uint32_t readPosMajor;
   uint32_t readPosMinor;
@@ -256,17 +252,6 @@ _Static_assert(offsetof(ctx_t, adpcmBuf)==96,
 
 _Static_assert(offsetof(ctx_t, pcmBuf)==256,
                "wrong write context (header) size");
-
-typedef struct __attribute__ ((__packed__)) StatusPacket
-{
-  uint32_t flags; /* 1 << 0 recording, 1 << 1 reading */
-  uint32_t recordings[NUM_PREV_RECS];
-  uint32_t recStart;
-  uint32_t recPos;
-  uint32_t readStart;
-  uint32_t readPosMajor;
-  uint32_t readPosMinor;
-} StatusPacket_t;
 
 #ifdef LOG_ADPCM_DATA
 typedef struct __attribute__ ((__packed__)) UartPacket
@@ -817,46 +802,41 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           }
 
           OutgoingMsg_t *outmsg = (OutgoingMsg_t*) List_get(&freeOutgoingMsgs);
-          BadpcmPacket_t* bap = (BadpcmPacket_t*)&outmsg->data[0];
+
           if (ctx.readPosMinor == 0)
           {
             size_t offset = (ctx.readPosMajor % DATA_SECT_COUNT) * SECT_SIZE + 92;
-
-            Display_print5(
-                dispHandle, 0xff, 0,
-                "read offset %d (%08x) @ major %d (%08x) minor %d", offset,
-                offset, ctx.readPosMajor, ctx.readPosMajor, ctx.readPosMinor);
-
-            NVS_read(nvsHandle, offset, &outmsg->data[4], 204);
-            ctx.readAdpcmState = *((AdpcmState_t*)&outmsg->data[4]);
-          }
-          else
-          {
-            size_t offset = (ctx.readPosMajor % DATA_SECT_COUNT) * SECT_SIZE + 96 + ctx.readPosMinor * 200;
-
-            Display_print5(
-                dispHandle, 0xff, 0,
-                "read offset %d (%08x) @ major %d (%08x) minor %d", offset,
-                offset, ctx.readPosMajor, ctx.readPosMajor, ctx.readPosMinor);
-
-            NVS_read(nvsHandle, offset, &bap->data[0], 200);
+            NVS_read(nvsHandle, offset, &ctx.readAdpcmState, sizeof(AdpcmState_t));
           }
 
-          bap->major = ctx.readPosMajor;
-          bap->minor = ctx.readPosMinor;
-          bap->index = ctx.readAdpcmState.index;
-          bap->sample = ctx.readAdpcmState.sample;
-          for (int i = 0; i < 200; i++)
+          size_t offset = (ctx.readPosMajor % DATA_SECT_COUNT) * SECT_SIZE + 96 + ctx.readPosMinor * BADPCM_DATA_SIZE;
+
+          Display_print5(
+              dispHandle, 0xff, 0,
+              "read offset %d (%08x) @ major %d (%08x) minor %d", offset,
+              offset, ctx.readPosMajor, ctx.readPosMajor, ctx.readPosMinor);
+
+          NVS_read(nvsHandle, offset, &outmsg->bad.data[0], BADPCM_DATA_SIZE);
+
+          outmsg->bad.major = ctx.readPosMajor;
+          outmsg->bad.minor = ctx.readPosMinor;
+          outmsg->bad.index = ctx.readAdpcmState.index;
+          outmsg->bad.sample = ctx.readAdpcmState.sample;
+
+          // update adpcm state for next read
+          for (int i = 0; i < BADPCM_DATA_SIZE; i++)
           {
-            char x = bap->data[i];
+            char x = outmsg->bad.data[i];
             adpcmDecoder(x & 0x0f, &ctx.readAdpcmState.sample, &ctx.readAdpcmState.index);
             adpcmDecoder((x >> 4) & 0x0f, &ctx.readAdpcmState.sample, &ctx.readAdpcmState.index);
           }
-          outmsg->len = sizeof(BadpcmPacket_t);
+
+          // outmsg->len = sizeof(BadpcmPacket_t);
+          outmsg->type = OMT_BADPCM;
           sendOutgoingMsg(outmsg);
 
           ctx.readPosMinor++;
-          if (ctx.readPosMinor == 20)
+          if (ctx.readPosMinor == 4000 / BADPCM_DATA_SIZE)
           {
             ctx.readPosMajor++;
             ctx.readPosMinor = 0;
@@ -1384,16 +1364,17 @@ static void loadRecordings(void)
 static void sendStatus(void)
 {
   OutgoingMsg_t *outmsg = (OutgoingMsg_t*) List_get(&freeOutgoingMsgs);
-  StatusPacket_t *status = (StatusPacket_t*) outmsg->data;
-  memcpy(status->recordings, &ctx.recordings,
+
+  memcpy(outmsg->status.recordings, &ctx.recordings,
          sizeof(uint32_t) * NUM_PREV_RECS);
-  status->recStart = ctx.recStart;
-  status->recPos = ctx.recPos;
-  status->readStart = ctx.readStart;
-  status->readPosMajor = ctx.readPosMajor;
-  status->readPosMinor = ctx.readPosMinor;
-  status->flags = ctx.recording ? 1 : 0 + ctx.reading ? 2 : 0;
-  outmsg->len = sizeof(StatusPacket_t);
+  outmsg->status.recStart = ctx.recStart;
+  outmsg->status.recPos = ctx.recPos;
+  outmsg->status.readStart = ctx.readStart;
+  outmsg->status.readPosMajor = ctx.readPosMajor;
+  outmsg->status.readPosMinor = ctx.readPosMinor;
+  outmsg->status.flags = ctx.recording ? 1 : 0 + ctx.reading ? 2 : 0;
+  // outmsg->len = sizeof(StatusPacket_t);
+  outmsg->type = OMT_STATUS;
   sendOutgoingMsg(outmsg);
 }
 

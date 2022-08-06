@@ -34,20 +34,55 @@ void Audio_unsubscribe();
  */
 extern Mailbox_Handle incomingMailbox;
 
+#define BADPCM_DATA_SIZE                  160
+#define NUM_PREV_RECS                     21
+#define NUM_TOTAL_RECS                    22
+
 typedef struct __attribute__ ((__packed__)) BadpcmPacket
 {
+
   uint32_t major;
   uint8_t minor;
   uint8_t index;
   int16_t sample;
-  uint8_t data[200];
+  uint8_t data[BADPCM_DATA_SIZE];
+
 } BadpcmPacket_t;
 
-typedef struct OutgoingMsg
+typedef struct __attribute__ ((__packed__)) StatusPacket
+{
+  uint32_t flags; /* 1 << 0 recording, 1 << 1 reading */
+  uint32_t recordings[NUM_PREV_RECS];
+  uint32_t recStart;
+  uint32_t recPos;
+  uint32_t readStart;
+  uint32_t readPosMajor;
+  uint32_t readPosMinor;
+} StatusPacket_t;
+
+enum OutgoingMsgType
+{
+  OMT_STATUS = 0,
+  OMT_BADPCM,
+};
+
+typedef struct __attribute__ ((__packed__)) OutgoingMsg
 {
   List_Elem listElem;
-  size_t len;
-  uint8_t data[208];
+  // size_t len;
+#ifdef LOG_BADPCM_DATA
+  uint64_t preamble;
+#endif
+  union {
+    uint8_t raw[0];
+    BadpcmPacket_t bad;
+    StatusPacket_t status;
+  };
+#ifdef LOG_BADPCM_DATA
+  uint8_t cka;
+  uint8_t ckb;
+#endif
+  enum OutgoingMsgType type;
 } OutgoingMsg_t;
 
 void sendOutgoingMsg(OutgoingMsg_t *msg);

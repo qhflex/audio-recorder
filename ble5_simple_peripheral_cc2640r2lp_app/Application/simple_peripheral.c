@@ -223,11 +223,18 @@ static uint8 advHandleLegacy;
 static GAP_Addr_Modes_t addrMode = DEFAULT_ADDRESS_MODE;
 
 static bool subscriptionOn;
-static GPTimerCC26XX_Handle hTimer;
 static List_List readingList;
 
-void timerCallback(GPTimerCC26XX_Handle handle,
-                   GPTimerCC26XX_IntMask interruptMask)
+// static GPTimerCC26XX_Handle hTimer;
+static Clock_Struct notiClock;
+
+//void timerCallback(GPTimerCC26XX_Handle handle,
+//                   GPTimerCC26XX_IntMask interruptMask)
+//{
+//  Event_post(syncEvent, SP_HTIMER_EVT);
+//}
+
+void clockCallback(UArg a0)
 {
   Event_post(syncEvent, SP_HTIMER_EVT);
 }
@@ -248,8 +255,8 @@ static uint8_t SimplePeripheral_getConnIndex(uint16_t connHandle);
 static uint8_t SimplePeripheral_removeConn(uint16_t connHandle);
 static uint8_t SimplePeripheral_clearConnListEntry(uint16_t connHandle);
 
-static void SimplePeripheral_startTimer(void);
-static void SimplePeripheral_stopTimer(void);
+//static void SimplePeripheral_startTimer(void);
+//static void SimplePeripheral_stopTimer(void);
 
 static bool SimplePeripheral_doNotify(int where);
 
@@ -399,13 +406,15 @@ static void SimplePeripheral_init(void)
   GAP_DeviceInit(GAP_PROFILE_PERIPHERAL, selfEntity, addrMode, NULL);
 
   // Initialize GPTimer
-  GPTimerCC26XX_Params params;
-  GPTimerCC26XX_Params_init(&params);
-  params.width = GPT_CONFIG_16BIT;
-  params.mode = GPT_MODE_PERIODIC;
-  params.direction = GPTimerCC26XX_DIRECTION_UP;
-  params.debugStallMode = GPTimerCC26XX_DEBUG_STALL_OFF;
-  hTimer = GPTimerCC26XX_open(Board_GPTIMER0A, &params); // Board_GPTIMER0A
+//  GPTimerCC26XX_Params params;
+//  GPTimerCC26XX_Params_init(&params);
+//  params.width = GPT_CONFIG_16BIT;
+//  params.mode = GPT_MODE_PERIODIC;
+//  params.direction = GPTimerCC26XX_DIRECTION_UP;
+//  params.debugStallMode = GPTimerCC26XX_DEBUG_STALL_OFF;
+//  hTimer = GPTimerCC26XX_open(Board_GPTIMER0A, &params); // Board_GPTIMER0A
+
+  Util_constructClock(&notiClock, clockCallback, 10, 1, false, NULL);
 
   subscriptionOn = false;
   List_clearList(&readingList);
@@ -794,21 +803,21 @@ static uint8_t SimplePeripheral_removeConn(uint16_t connHandle)
   return connIndex;
 }
 
-static void SimplePeripheral_startTimer(void)
-{
-  Types_FreqHz freq;
-  BIOS_getCpuFreq(&freq);
-  // GPTimerCC26XX_Value loadVal = freq.lo / 1000 - 1; //47999
-  GPTimerCC26XX_Value loadVal = freq.lo / 50 - 1;
-  GPTimerCC26XX_setLoadValue(hTimer, loadVal);
-  GPTimerCC26XX_registerInterrupt(hTimer, timerCallback, GPT_INT_TIMEOUT);
-  GPTimerCC26XX_start(hTimer);
-}
-
-static void SimplePeripheral_stopTimer(void)
-{
-  GPTimerCC26XX_stop(hTimer);
-}
+//static void SimplePeripheral_startTimer(void)
+//{
+//  Types_FreqHz freq;
+//  BIOS_getCpuFreq(&freq);
+//  // GPTimerCC26XX_Value loadVal = freq.lo / 1000 - 1; //47999
+//  GPTimerCC26XX_Value loadVal = freq.lo / 50 - 1;
+//  GPTimerCC26XX_setLoadValue(hTimer, loadVal);
+//  GPTimerCC26XX_registerInterrupt(hTimer, timerCallback, GPT_INT_TIMEOUT);
+//  GPTimerCC26XX_start(hTimer);
+//}
+//
+//static void SimplePeripheral_stopTimer(void)
+//{
+//  GPTimerCC26XX_stop(hTimer);
+//}
 
 static bool SimplePeripheral_doNotify(int where)
 {
@@ -818,15 +827,26 @@ static bool SimplePeripheral_doNotify(int where)
   OutgoingMsg_t *msg = (OutgoingMsg_t*)List_head(&readingList);
   if (!msg) return false;
 
+  size_t len;
+  switch (msg->type)
+  {
+  case OMT_STATUS:
+    len = sizeof(StatusPacket_t);
+    break;
+  case OMT_BADPCM:
+    len = sizeof(BadpcmPacket_t);
+    break;
+  }
+
   noti.pValue = (uint8_t*) GATT_bm_alloc(connList[0], ATT_HANDLE_VALUE_NOTI,
-                                         msg->len, &noti.len);
+                                         len, &noti.len);
   if (noti.pValue == NULL)
   {
     Display_print1(dispHandle, 0xff, 0, "------ notify failed, nomem, where %d", where);
     return false;
   }
 
-  memcpy(noti.pValue, msg->data, noti.len);
+  memcpy(noti.pValue, msg->raw, noti.len);
   noti.handle = simpleProfileChar1ValueAttrHandle->handle;
   status = GATT_Notification(connList[0], &noti, 0);
 
@@ -851,12 +871,18 @@ static bool SimplePeripheral_doNotify(int where)
 static void SimplePeripheral_onSubscribe(void)
 {
   subscriptionOn = true;
-  SimplePeripheral_startTimer();
+  // SimplePeripheral_startTimer();
+  // Util_startClock(&clockObj);
 }
 
 static void SimplePeripheral_onUnsubscribe(void)
 {
-  SimplePeripheral_stopTimer();
+  // SimplePeripheral_stopTimer();
+  if (Util_isActive(&notiClock))
+  {
+    Util_stopClock(&notiClock);
+  }
+
   subscriptionOn = false;
   SimplePeripheral_drain(2);
 }
@@ -865,9 +891,28 @@ static void SimplePeripheral_drain(int where)
 {
   if (subscriptionOn)
   {
-    while (SimplePeripheral_doNotify(where))
+//    while (SimplePeripheral_doNotify(where))
+//    {
+//      freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
+//    }
+    while (List_head(&readingList))
     {
-      freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
+      if (!SimplePeripheral_doNotify(where))
+      {
+        if (!Util_isActive(&notiClock))
+        {
+          Util_startClock(&notiClock);
+        }
+        break;
+      }
+      else
+      {
+        if (Util_isActive(&notiClock))
+        {
+          Util_stopClock(&notiClock);
+        }
+        freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
+      }
     }
   }
   else
