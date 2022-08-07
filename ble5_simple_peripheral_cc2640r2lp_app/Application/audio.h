@@ -35,26 +35,24 @@ void Audio_unsubscribe();
 extern Mailbox_Handle incomingMailbox;
 
 #define BADPCM_DATA_SIZE                  160
-#define NUM_PREV_RECS                     21
-#define NUM_TOTAL_RECS                    22
+#define NUM_RECS                          21
 
 typedef struct __attribute__ ((__packed__)) BadpcmPacket
 {
-
   uint32_t major;
   uint8_t minor;
   uint8_t index;
   int16_t sample;
   uint8_t data[BADPCM_DATA_SIZE];
-
 } BadpcmPacket_t;
 
-_Static_assert(sizeof(BadpcmPacket_t)==BADPCM_DATA_SIZE + 8, "wrong badcpm packet size");
+_Static_assert(sizeof(BadpcmPacket_t)==BADPCM_DATA_SIZE + 8,
+               "wrong badcpm packet size");
 
 typedef struct __attribute__ ((__packed__)) StatusPacket
 {
   uint32_t flags; /* 1 << 0 recording, 1 << 1 reading */
-  uint32_t recordings[NUM_PREV_RECS];
+  uint32_t recordings[NUM_RECS];
   uint32_t recStart;
   uint32_t recPos;
   uint32_t readStart;
@@ -62,8 +60,12 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
   uint32_t readPosMinor;
 } StatusPacket_t;
 
-_Static_assert(sizeof(StatusPacket_t)==108, "wrong status packet size");
+_Static_assert(sizeof(StatusPacket_t) == 108, "wrong status packet size");
 
+/*
+ * for alignment inside struct, OutgoingMsgType is defined to uint32_t,
+ * rather than being defined as enum.
+ */
 #define OMT_STATUS                (0)
 #define OMT_BADPCM                (1)
 
@@ -73,7 +75,8 @@ typedef struct __attribute__ ((__packed__)) OutgoingMsg
 {
   List_Elem listElem;
   OutgoingMsgType type;     // +   4 = 12
-  union {                   // + 168 = 180
+  union
+  {                   // + 168 = 180
     uint8_t raw[0];
     BadpcmPacket_t bad;
     StatusPacket_t status;

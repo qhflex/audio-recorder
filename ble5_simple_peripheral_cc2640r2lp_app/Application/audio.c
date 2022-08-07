@@ -181,8 +181,6 @@ typedef struct __attribute__ ((__packed__)) AdpcmState
 
 _Static_assert(sizeof(AdpcmState_t)==4, "wrong size of adpcm state");
 
-
-
 typedef struct ctx
 {
   /*
@@ -211,7 +209,7 @@ typedef struct ctx
    * start          0x0001          0x0003  0x0003
    * pos            0x0001          0x0003  0x0004
    *
-   *                B1              B3
+   *                B1              B3      B4 (running)
    *
    * The initial state is A0. When A1 starts, the snapshot of A0 is saved in
    * sector 0. Similarly, if the recording continues, A1 will be written into
@@ -221,7 +219,7 @@ typedef struct ctx
    * segment starts by one cell, which means, prevs[last] = curr; the both
    * current start and current pos are assigned to current sector index.
    */
-  uint32_t recordings[NUM_PREV_RECS];
+  uint32_t recordings[NUM_RECS];
   uint32_t recStart;
   uint32_t recPos;
   AdpcmState_t recAdpcmStateInSect;                  // sector-wise adpcm state
@@ -544,14 +542,14 @@ static void Audio_taskFxn(UArg a0, UArg a1)
   Display_print0(dispHandle, 0xff, 0, "prevs loaded");
 
 #ifndef Display_DISABLE_ALL
-  for (int i = 0; i < NUM_PREV_RECS + 2; i++)
+  for (int i = 0; i < NUM_RECS + 2; i++)
   {
     uint32_t x = ctx.recordings[i];
-    if (i < NUM_PREV_RECS)
+    if (i < NUM_RECS)
     {
       Display_print2(dispHandle, 0xff, 0, "      %d (0x%08x)", x, x);
     }
-    else if (i == NUM_PREV_RECS)
+    else if (i == NUM_RECS)
     {
       Display_print2(dispHandle, 0xff, 0, "start %d (0x%08x)", x, x);
     }
@@ -787,7 +785,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
           {
             if (!ctx.recording)
             {
-              Display_print0(dispHandle, 0xff, 0, "stop reading forward when recording stopped ");
+              Display_print0(dispHandle, 0xff, 0, "stop (forward) reading  when recording stopped ");
               ctx.reading = false;
               sendStatusMsg();
             }
@@ -888,7 +886,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 #if defined(LOG_ADPCM_DATA) && defined (LOG_NVS_AFTER_AUTOSTOP)
     if (event & AUDIO_REC_AUTOSTOP)
     {
-      uint32_t start = ctx.recordings[NUM_PREV_RECS - 1];
+      uint32_t start = ctx.recordings[NUM_RECS - 1];
       uint32_t end = ctx.recStart;
       for (uint32_t pos = start; pos != end; pos++)
       {
@@ -1024,7 +1022,7 @@ static void stopRecording(void)
     I2S_close(i2sHandle);
   }
 
-  for (int i = 0; i < NUM_PREV_RECS; i++)
+  for (int i = 0; i < NUM_RECS; i++)
   {
     ctx.recordings[i] = ctx.recordings[i + 1];
   }
@@ -1370,7 +1368,7 @@ static void loadRecordings(void)
   uint32_t counter = MONOTONIC_COUNTER;
   if (counter == 0)
   {
-    for (int i = 0; i < NUM_PREV_RECS; i++)
+    for (int i = 0; i < NUM_RECS; i++)
     {
       ctx.recordings[i] = 0xFFFFFFFF;
     }
@@ -1379,19 +1377,22 @@ static void loadRecordings(void)
   {
     // skip earlist one
     size_t offset = (counter - 1) % DATA_SECT_COUNT * SECT_SIZE + 4;
-    NVS_read(nvsHandle, offset, &ctx, sizeof(uint32_t) * NUM_PREV_RECS);
+    NVS_read(nvsHandle, offset, &ctx, sizeof(uint32_t) * NUM_RECS);
   }
 
   ctx.recStart = counter;
   ctx.recPos = counter;
 }
 
+/*
+ * @fn sendStatusMsg
+ */
 static void sendStatusMsg(void)
 {
   OutgoingMsg_t *outmsg = (OutgoingMsg_t*) List_get(&freeOutgoingMsgs);
 
   memcpy(outmsg->status.recordings, &ctx.recordings,
-         sizeof(uint32_t) * NUM_PREV_RECS);
+         sizeof(uint32_t) * NUM_RECS);
   outmsg->status.recStart = ctx.recStart;
   outmsg->status.recPos = ctx.recPos;
   outmsg->status.readStart = ctx.readStart;
