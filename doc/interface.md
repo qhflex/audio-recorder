@@ -139,7 +139,7 @@ Notification是固件向客户端程序传输数据的唯一方式。（因为�
 
 <br/>
 
-#### 5.2.2 `Status`
+#### 5.2.2 状态（`Status`）
 
 `Status`的C语言结构体定义如下，`recordings`数组包含21个元素，含义后述；`Status`数据结构的总大小为108字节，共包含27个`uint32_t`类型数据。
 
@@ -225,34 +225,30 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
 
 <br/>
 
-#### ADPCM数据
+#### 5.2.4 音频数据（`ADPCM_DATA`）
 
-C语言格式的ADPCM数据包结构如下
+C语言格式的`ADPCM_DATA`数据结构如下
 
 ```C
 #define ADPCM_DATA_SIZE                  160
 
-typedef struct __attribute__ ((__packed__)) AdpcmPacket
+typedef struct __attribute__ ((__packed__)) ADPCM_DATA
 {
   uint32_t major;
   uint8_t minor;
   uint8_t index;
   int16_t sample;
   uint8_t data[ADPCM_DATA_SIZE];
-} AdpcmPacket_t;
+} ADPCM_DATA;
 ```
 
 
 
-其中`major`是Sector地址，`minor`是0-24的子地址，sample和index是ADPCM解码器需要的编解码状态，最后是160字节的ADPCM数据，总数据包大小是168字节。
-
-
-
-如前所述实际上sample和index这两个数据不是每包必要的，只要`minor`为0的（每个Sector的）第一个包提供即可。但同类型的所有的数据包等长更方便一点。
+其中`major`是sector地址，`minor`是取值范围0-24的`packet index`，`sample`和`index`是ADPCM编解码器需要的编解码状态，最后是160字节的ADPCM编码数据，总数据包大小168字节。实际上`sample`和`index`这两个数据不是每个包必要的，只要每sector第一个包（`minor=0`）提供即可；但使用等长数据包更方便一点。
 
 <br/>
 
-### Command
+### 5.3 指令（Command）
 
 蓝牙连接建立后，客户端应立刻开启Notification，只有开启Notification后写入的指令才是有效的，如果Notification没有打开，固件程序收到写入的指令后直接丢弃，不会执行。
 
@@ -268,19 +264,25 @@ typedef struct __attribute__ ((__packed__)) AdpcmPacket
 
 执行任何指令后，固件都会返回一个`Status`数据包显示执行命令后设备内部的状态，不额外提供成功失败和错误类型。
 
+<br/>
+
 #### 编码
 
-| Op Code        | Length | Format and Example                                           |
-| -------------- | ------ | ------------------------------------------------------------ |
-| NO_OP          | 1 byte | `00`                                                         |
-| STOP_REC       | 1 byte | `01`                                                         |
-| START_REC      | 1 byte | `02`                                                         |
-| STOP_READ      | 1 byte | `03`                                                         |
-| START_READ (1) | 1 byte | `04`                                                         |
-| START_READ (2) | 5 byte | `04 02 01 00 00`, read from sector `0x00000102` (to sector `recStart`) |
-| START_READ (3) | 9 byte | `04 02 01 00 00 04 03 00 00 `, read from sector `0x00000102` to sector `0x00000304` (exclusive) |
+| Op Code          | Length | Format and Example                                           |
+| ---------------- | ------ | ------------------------------------------------------------ |
+| `NO_OP`          | 1 byte | `00`                                                         |
+| `STOP_REC`       | 1 byte | `01`                                                         |
+| `START_REC`      | 1 byte | `02`                                                         |
+| `STOP_READ`      | 1 byte | `03`                                                         |
+| `START_READ` (1) | 1 byte | `04`                                                         |
+| `START_READ` (2) | 5 byte | `04 02 01 00 00`, read from sector `0x00000102` (to sector `recStart`) |
+| `START_READ` (3) | 9 byte | `04 02 01 00 00 04 03 00 00 `, read from sector `0x00000102` to sector `0x00000304` (exclusive) |
 
 
+
+`START_READ`提供了3种格式，前面两种可以看作第三种的简略格式；第三种格式需提供读取录音的起始sector和结束sector的地址（起始包含结束不包含）；第二种格式不提供结束值，结束值被自动设定为`recStart`，即最后一段已结束的录音的结束点；第一种格式不提供起始和结束，起始会被当作0处理，并自动调整到最早的未覆盖录音数据发送；结束点会自动设定未`recStart`。使用第一种格式，如果不发生传输中断的话，可以一次型提取设备内所有录音数据。
+
+<br/>
 
 
 
