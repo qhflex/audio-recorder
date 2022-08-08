@@ -1,31 +1,32 @@
 # Audio Format, Storage, and BLE Interface
 
-## Document Version
+## 文档版本
 
 author: matianfu (at) gingerologist.com
 
 2022-08-07, initial version, draft
 
+</br>
 
+## 范围与读者
 
-## Scope and Audience
+本文档描述`BLE Audio Recorder`设备固件使用的音频格式、存储方式、和蓝牙低功耗（Bluetooth LE）访问接口设计，包括输出数据格式和客户端可用的指令格式。
 
-本文档描述BLE Audio Recorder设备固件使用的音频格式，存储方式，和蓝牙低功耗访问接口，包括输出的数据格式和客户端指令。
+本文档不包含固件内部设计与实现的描述、调试和测试方式，这些内容由其它文档描述。
 
-本文档不包含固件内部设计描述、调试和测试方式（由其它文档描述）。
+本文档是项目集成和交付的基础文档，所有相关软硬件开发测试人员都应该阅读本文档。
 
-所有相关软硬件件开发人员和测试人员都应该阅读本文档。
-
-
+</br>
 
 ## 音频格式
 
-MEMS Microphone产生的原始数据格式为signed 16bit PCM（Pulse Code Modulation）格式，APP或其它客户端软件解码后也还原成该格式播放；内部存储和输出均使用如下音频格式：
+MEMS Microphone生成的原始数据格式为Signed 16bit PCM（Pulse Code Modulation），客户端软件把音频数据解码后也还原成该格式播放。
 
-- 存储和接口传输均使用ADPCM（Adaptive Differential PCM）格式，后述；
-- 设备只有一个麦克风，音频数据配置为单声道模式（而不是立体声模式但LR使用同样数据）；
-- 固件内部固定使用16000采样频率，该采样率下单独录音存储和单独蓝牙读取均无问题；
-  - 固件目前不排除同时录音和蓝牙读取录音的使用方式，但该使用方式不在强制需求范围内，如果有显著性能影响，会禁用该工作方式；APP开发者不应假定同时工作模式是可用的；
+考虑到存储容量和BLE传输带宽限制，固件在设备内部存储和输出均使用ADPCM格式，Adaptive Differential PCM。设备仅有一个麦克风，音频数据输出采用单声道格式。
+
+固定使用16000采样率（Sampling Rate），该采样率下单独录音存储和单独蓝牙读取均无问题；固件设计上不禁止同时录音和蓝牙读取录音的使用方式，但该使用方式不在需求范围内，也不保证满足性能要求；客户端开发者应避免两者同时工作的方式。
+
+</br>
 
 ### ADPCM说明
 
