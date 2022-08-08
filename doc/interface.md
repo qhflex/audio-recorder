@@ -98,18 +98,18 @@ Flash的实际容量为128Mbits（16M Bytes），但应用开发者该容量无�
 
 ## 5 BLE接口设计
 
-### Service and Characteristic
+### 5.1 Service and Characteristic
 
-Service和Characteristic使用的模板是：`7c95XXXX-6d0c-436f-81c8-3fd7e3db0610`，其中XXXX是短ID代入的值；完整定义如下：
+Service和Characteristic使用的UUID模板是：`7c95XXXX-6d0c-436f-81c8-3fd7e3db0610`，其中`XXXX`是短ID代入的值，完整定义如下：
 
-- 全局仅定义一个服务，短ID是`9500`，全长UUID是`7c959500-6d0c-436f-81c8-3fd7e3db0610`；
+- 仅定义一个服务，短ID是`9500`，全长UUID是`7c959500-6d0c-436f-81c8-3fd7e3db0610`；
 
-- 上述服务仅包含一个Characteristic，短ID是`9501`，全长UUID是`7c959501-6d0c-436f-81c8-3fd7e3db0610`；
-  - 该Characteristic提供`write`和`notification`能力，其中`write`当且仅当打开`notification`时有效，否则客户端写入的值都被忽略。
+- 该服务仅包含一个Characteristic，短ID是`9501`，全长UUID是`7c959501-6d0c-436f-81c8-3fd7e3db0610`；
+  - 提供`write`和`notification`能力，其中`write`当且仅当打开`notification`时有效，否则客户端写入的值都被忽略。
 
+<br/>
 
-
-### Notification Data
+### 5.2 Notification Data
 
 固件提供两种Notification数据：ADPCM数据和状态（Status），任何命令写入都会返回（Status），读命令会产生持续的ADPCM数据返回。两种返回都是固定长度且大小不同，所以无需额外定义数据帧，标注长度和类型来区分。
 
