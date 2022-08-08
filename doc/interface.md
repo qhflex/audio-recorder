@@ -141,7 +141,7 @@ Notification是固件向客户端程序传输数据的唯一方式。（因为�
 
 #### 5.2.2 `Status`
 
-Status数据的C语言格式如下，`recordings`是包含21个元素的数组，含义后述；该数据结构的大小为108字节，包含27个`uint32_t`类型的数据。
+`Status`的C语言结构体定义如下，`recordings`数组包含21个元素，含义后述；`Status`数据结构的总大小为108字节，共包含27个`uint32_t`类型数据。
 
 ```C
 #define NUM_RECS				21
@@ -160,34 +160,27 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
 
 
 
-`flags`目前仅使用最低的两位；最低位表示`recording`，设为1表示当前正在录音；次低位表示`reading`，设为1表示当前正在读取录音数据。因为设备的设置是只接受一个BLE连接，实际上客户端是知道`reading`状态的，在Status里输出该信息主要是方便调试。
+`flags`目前仅使用最低的两位；最低位表示`recording`，设为1表示当前正在录音；次低位表示`reading`，设为1表示当前正在读取录音数据。因为设备只接受一个BLE连接，实际上客户端是知道`reading`状态的，在`Status`里包含该信息主要是方便调试。
 
+<br/>
 
-
-在设备内部，录音和读取录音数据是两个相对独立的部分。rec前缀的成员表示的都是和录音状态有关的数据，read前缀的成员表示的都是和读取录音状态有关的数据。
+在设备内部，录音和读取录音数据是两个相对独立的部分。`rec`前缀命名结构体成员都是和录音有关的状态数据，`read`前缀的成员都是和读取录音有关的状态数据。
 
 - 录音
-  - 如果当前正在录音，即recording flag为1，`recStart`是当前这段录音的起始sector地址；`recPos`是当前正在写入录音的sector地址；
-  - 如果当前不在录音，即recording flag为0，`recStart`和`recPos`是相等的，指向下一次录音开始时的为sector地址；
-  - 和数组类似，`recPos`这个值即可以解释成当前正在写入的index，也可以解释成总计写入过的sector的数量；但因为是循环写入设计，写入过的地址如果太早可能已经被覆盖了，无法再读回来；如果尚未发生覆盖，从0到`recPos-1`的数据都可以读出；
-- 读取
-  - `readStart`是当前读取请求给的原始参数，该参数不会调整，即使它小于当前尚未被覆盖的最小的Sector地址；
-  - `readPosMajor`是当前读取的Sector地址；
-  - `readPosMinor`是当前读取的Sector里的更小的读取单元的index；
+  - 如果当前正在录音，即`recording`标记为1，`recStart`是当前这段录音的起始sector地址；`recPos`是当前正在写入录音的sector地址，均为逻辑地址（下同）；
+  - 如果当前不在录音，即`recording`标记为0，`recStart`和`recPos`是相等的，指向下一次录音开始的第一个sector地址；
+- 读取录音
+  - `readStart`是当前读取命令给的原始参数，该参数不会自动调整，即使它小于当前尚未被覆盖的最小的Sector地址；
+  - `readPosMajor`是当前在读取的Sector地址；
+  - `readPosMinor`是当前在读取的Sector内的读取单元的index；一个Sector有4000个字节音频数据，每个ADPCM数据包只包含160个ADPCM数据，所以`readPosMinor`的实际取值范围是0-24，即4000字节的数据要拆成25个包发送；
 
-一个Sector有4000个字节，每个ADPCM数据包只包含160个ADPCM数据，所以readPosMinor的实际取值范围是0-24。
+<br/>
 
+`Status`提供的读取录音状态主要是为调试方便，没有业务需求要求客户端软件显示或使用`Status`内和读取录音数据相关的状态。录音状态是客户端会需要使用的，客户端与设备建立蓝牙连接时，设备可能已经在录音，客户端程序还可以根据`recStart`和`recPos`判断当前录音已进行多长时间。
 
+<br/>
 
-对于应用开发者来说，应该没有业务需求会解释当前读取行为的状态参数，请求是应用自己发出的，如果notification关闭或者蓝牙断开，读取操作也就自动结束，不会影响到下一次连接。这里提供的read前缀的状态参数可以看作仅固件开发者调试使用。
-
-
-
-对录音来说，手机与设备建立蓝牙连接时有可能已经开始了录音，应用可以根据recording flag判断状态，也可以根据`recStart`和`recPos`判断当前录音已经进行了多长时间（一个sector表示0.5s）；`recStart`还和下一节阐述的录音分段记录有关。
-
-
-
-#### Recordings
+#### 5.2.3 Recordings
 
 Status Data里的`recordings`数组，加上`recStart`正好定义了最近21条历史录音记录的分段起始和结束的位置。
 
