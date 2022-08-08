@@ -22,37 +22,39 @@ author: matianfu (at) gingerologist.com
 
 MEMS Microphone生成的原始数据格式为Signed 16bit PCM（Pulse Code Modulation），客户端软件把音频数据解码后也还原成该格式播放。
 
-考虑到存储容量和BLE传输带宽限制，固件在设备内部存储和输出均使用ADPCM格式，Adaptive Differential PCM。设备仅有一个麦克风，音频数据输出采用单声道格式。
+考虑到存储容量和BLE传输带宽限制，固件在设备内部存储和输出均使用ADPCM格式，Adaptive Differential PCM。设备仅有一个麦克风，音频数据输出为单声道格式。
 
-固定使用16000采样率（Sampling Rate），该采样率下单独录音存储和单独蓝牙读取均无问题；固件设计上不禁止同时录音和蓝牙读取录音的使用方式，但该使用方式不在需求范围内，也不保证满足性能要求；客户端开发者应避免两者同时工作的方式。
+固件固定使用16000采样率（Sampling Rate），经测试，该采样率下单独录音存储和单独蓝牙读取均可满足性能要求；固件不禁止同时录音和蓝牙读取录音的使用方式，但该使用方式不在需求范围内，也不保证满足性能要求；客户端开发者应避免两者同时工作的方式。
 
 </br>
 
 ### ADPCM说明
 
-ADPCM使用一个近似值查表的方法有损压缩语音数据，压缩比固定为4:1，即每个16bit PCM Sample压缩成4bit；一段（chunk）PCM Sample压缩成ADPCM后除了语音数据还额外需要3个byte存储编解码器的工作状态（ADPCM state），该状态包含一个16bit PCM Sample，代码里一般命名为`prevsample`，类型为`int16_t`（注意是有符号的），和一个`char`类型的index，该index的实际取值范围仅为0~15，所以`signed char`或`unsigned char`均可。
+ADPCM使用一个近似值查表的方法实现有损压缩数据，压缩比固定为`4:1`，即每个16bit PCM Sample压缩成4bit。
 
+一段PCM样本压缩成ADPCM格式后，除编码的声音数据还需要额外3个byte记录编解码器工作状态，包含一个16bit PCM样本（`sample`，类型为`int16_t`）和索引（`index`，类型为`char`），`index`实际取值范围为0-15，所以有无符号均可。
 
+</br>
 
-ADPCM使用的近似表有很多种，因此ADPCM实际上有很多种；固件采用的格式是IMA ADPCM，该格式无需硬浮点和硬乘法器，仅需处理器支持bit shift即可。本项目固件使用[Microchip提供源码的ADPCM编解码器实现](https://ww1.microchip.com/downloads/en/AppNotes/00643b.pdf)。
+ADPCM使用的近似值表有多种标准；固件选择的标准是IMA ADPCM，该标准广泛使用，无需处理器含硬件浮点单元和硬件乘法器，仅需处理器支持bit shift即可。固件使用的IMA ADPCM编解码器源自[Microchip提供源码的ADPCM编解码器实现](https://ww1.microchip.com/downloads/en/AppNotes/00643b.pdf)，该文档包含完整的C代码。
 
+</br>
 
+如果在Windows平台上使用设备产生的ADPCM语音数据，注意Microsoft提供的ADPCM Codec有两种，`XAudio2`里缺省使用的是Microsoft ADPCM格式，不是Microsoft IMA ADPCM格式，如果开发者使用Microsoft提供的Codec，要找到办法配置成后面一种。如何配置开发者自行搜索，固件开发者不熟悉Windows/.net平台开发，无法提供支持。
 
-如果在Windows平台上使用设备产生的ADPCM语音数据，注意Microsoft提供的ADPCM Codec有两种，XAudio2里缺省使用的是Microsoft ADPCM格式，不是Microsoft IMA ADPCM格式，如果开发者使用Microsoft的Codec播放要找到办法配置成后面一种；如何配置需自行搜索，固件开发者不熟悉Windows/.net平台开发，无法提供支持。
+<br/>
 
+流行的WAV文件格式支持多种ADPCM格式，包括IMA ADPCM格式，但文件头需使用Microsoft定义的扩展（extension）格式；如需把设备产生的ADPCM数据直接拼成WAV文件，使用标准的音频播放器播放（不限于Windows平台），可以采取该格式。同样的，固件开发者无法提供相关技术支持，有该需求的开发者请自行搜索Microsoft提供的文档。
 
+<br/>
 
-流行的WAV文件格式支持多种ADPCM格式，包括IMA ADPCM格式，但文件头需使用Microsoft定义的扩展（extension）格式；如果需要把设备产生的ADPCM数据直接拼成WAV文件，使用标准的音频播放器播放（不限于Windows平台），可以采取这种方式；但同样，固件开发者无法提供相关技术支持，有该需求的开发者请自行搜索Microsoft提供的文档。
+与MP3等音频格式不同，ADPCM没有统一的帧（Frame）格式定义。如果一段完整的ADPCM编码的音频数据可保证正确性，帧不是必要的，甚至编解码器状态也不必要，因为`sample`和`index`初始值均为0。
 
+<br/>
 
+实际使用中应用会根据实际要求自定义“段”（Chunk），每个Chunk记录开始时编解码器状态（`sample`和`index`），这样回放时允许从数据中间的某个Chunk直接开始播放，否则只能从头开始解码至所需起始播放位置；在音频数据因各种原因出错时，每段存储解码器状态也可将错误影响限于一个Chunk内。在Microsoft扩展的WAV文件格式里，允许文件自定义Chunk的大小。
 
-与MP3等音频格式不同，ADPCM没有统一的帧（Frame）的概念或约定俗成的容器格式。如果一段完整音频的数据可保证正确，帧不是必要的，甚至保存编解码器状态也不必要，因为肯定有预定义的初始化状态，比如IMA ADPCM的编解码器状态，sample和index均初始化为0。
-
-
-
-实际使用中应用会根据需求和实现上的限制自定义类似帧的『段』（Chunk），每个Chunk记录一份Chunk开始时编解码器状态，这样在回放时允许从中间的Chunk直接开始播放，否则的话只能从头开始解码以获取当前段的编解码器状态；另外在音频数据因各种原因出错时，每段存储解码器状态可将错误影响范围限于一个Chunk内，不产生全局的影响。
-
-- Microsoft的WAV格式里，允许文件自定义Chunk的大小
+<br/>
 
 
 
