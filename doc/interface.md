@@ -109,13 +109,19 @@ Service和Characteristic使用的UUID模板是：`7c95XXXX-6d0c-436f-81c8-3fd7e3
 
 <br/>
 
-### 5.2 Notification Data
+### 5.2 Notification
 
-固件提供两种Notification数据：ADPCM数据和状态（Status），任何命令写入都会返回（Status），读命令会产生持续的ADPCM数据返回。两种返回都是固定长度且大小不同，所以无需额外定义数据帧，标注长度和类型来区分。
+Notification是固件向客户端程序传输数据的唯一方式。（因为只有一个Characteristic而且未提供READ能力）。
 
-> 两种数据格式都需要使用大数据包。所以应用程序必须先协商MTU，原则上应保证MTU协商到251字节，这是固件内部设置，也是CC2640R2芯片能支持到的最大值，使用nRF Connect应用调试可以看到该目标是可以达到的，固件开发者使用Nokia 7 Plus（很古老的手机）和Motorola Edge X30均可达到该目标。
+<br/>
 
+固件提供两种Notification数据格式：一种是状态数据（`Status`），客户端写入任何命令固件都会返回`Status`；另一种是ADPCM格式的语音数据（`ADPCM_DATA`），客户端发出读取录音数据指令（`START_READ`）后会获得连续的语音数据包数据返回。`Status`和`ADPCM_DATA`均为固定长度，前者108字节，后者168字节，客户端可根据大小判定获得的数据是哪种格式。
 
+<br/>
+
+两种Notification数据格式大小都超过了BLE最基础的23字节`ATT_MTU`大小（扣除1字节att data size，最大payload为22字节，如果使用LightBlue接受Notification，就只能接受这么多），需要使用更大的`ATT_MTU`。**应用程序建立蓝牙连接后必须先协商MTU**。固件设置的最大PDU为255字节，也是CC2640R2芯片能支持的最大值，使用nRF Connect应用调试可以看到该目标是可以达到的（对应的`MTU`值为251，最大payload为244字节），固件开发者使用Nokia 7 Plus（很古老的手机）和Motorola Edge X30均可达到该目标。如果无法协商到至少175字节的`MTU`，则语音传输无法工作。
+
+<br/>
 
 #### Endianness
 
