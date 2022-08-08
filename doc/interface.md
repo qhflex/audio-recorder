@@ -123,23 +123,23 @@ Notification是固件向客户端程序传输数据的唯一方式。（因为�
 
 <br/>
 
-#### Endianness
+#### 5.2.1 字节序（Endianness）
 
-注意大于1字节宽度的所有数据类型都使用Little Endian格式存储，这是BLE的编码习惯，也是绝大多数现行MCU的缺省配置，包括ARM Cortex M。
+注意大于1字节宽度的所有数据类型都使用Little Endian字节序传输，这是BLE的设计习惯（convention），也是绝大多数现行MCU的缺省配置，包括ARM Cortex M。
 
+<br/>
 
+在文档书写上仍使用常用约定，例如`uint32_t`格式的1写为`0x00000001`；在数据传输上，用Byte Array解释时，看到的是`01 00 00 00`，包括使用nRF Connect或者LightBlue调试时，界面上看的都是后者。本文档约定在使用C语言数据格式表述值时均以`0x`作为前缀，在使用Little Endian表述BLE数据传输时，包括发送和接受，均不使用`0x`前缀且每字节分开，就象本段里给出的两个例子一样。
 
-但是在文档书写上仍然使用常用习惯，例如`uint32_t`格式的1写为`0x00000001`，但是在数据传输上，用Byte Array解释时，看到的是`01 00 00 00`，包括使用nRF Connect或者Lightblue调试时。本文档约定在使用C格式时均以`0x`作为前缀表达数据值，在使用Little Endian表达BLE命令时不使用`0x`前缀且每字节分开。就象本段落里给出的例子一样。
+<br/>
 
+注意即使使用Little Endian表达时，包括在nRF Connect或者LightBlue软件界面上看到的Byte Array格式，`01`里的两个字符，仍然是4个most significant bits在前面（即`0`），4个least significant bits在后面（即`1`），换句话说，Endianness没有体现在bit order上，仅仅体现在byte order上。
 
+> 实际上Endianness对bit order是有影响的，在C语言里如果用bit定义结构体内的整数位宽就会发现Endianness也应用在bits上，但是这里讨论的实际上是一个写法（notation）问题，并不是编译器怎么处理bits的问题。所以bit order和endianness的关系和这一段所说的notation约定是无关的。固件设计里没有在C结构体内用bit宽度定义成员的地方。
 
-注意即使在使用Little Endian格式表达时，包括在nRF Connect或者LightBlue软件界面上看到的Byte Array格式，`01`里的两个字符仍然是4个most significant bits在前面（即0），4个least significant bits在后面（即1），换句话说，Endianness没有体现在bit order上，仅仅体现在byte order上。
+<br/>
 
-> 实际上Endianness对bit order是有影响的，在C语言里如果用bit定义结构体内的整数位宽就会发现Endianness也应用在bits上，但是这里讨论的实际上是一个显示上的写法（notation）问题，并不是编译器怎么处理bits的问题。所以bit order和endianness的关系和这一段说的事情是无关的。
-
-
-
-#### Status Data
+#### 5.2.2 `Status`
 
 Status数据的C语言格式如下，`recordings`是包含21个元素的数组，含义后述；该数据结构的大小为108字节，包含27个`uint32_t`类型的数据。
 
