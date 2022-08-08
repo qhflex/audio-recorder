@@ -1,6 +1,6 @@
 # Audio Format, Storage, and BLE Interface
 
-## 文档版本
+## 1 文档版本
 
 author: matianfu (at) gingerologist.com
 
@@ -8,7 +8,7 @@ author: matianfu (at) gingerologist.com
 
 </br>
 
-## 范围与读者
+## 2 范围与读者
 
 本文档描述`BLE Audio Recorder`设备固件使用的音频格式、存储方式、和蓝牙低功耗（Bluetooth LE）访问接口设计，包括输出数据格式和客户端可用的指令格式。
 
@@ -18,7 +18,7 @@ author: matianfu (at) gingerologist.com
 
 </br>
 
-## 音频格式
+## 3 音频格式
 
 MEMS Microphone生成的原始数据格式为Signed 16bit PCM（Pulse Code Modulation），客户端软件把音频数据解码后也还原成该格式播放。
 
@@ -58,7 +58,7 @@ ADPCM使用的近似值表有多种标准；固件选择的标准是IMA ADPCM，
 
 
 
-## 存储
+## 4 存储
 
 设备内部包含SPI NOR Flash，最小擦写单元是Sector（4096 Bytes），固件也使用Sector作为读取时的最小寻址单位。
 
@@ -96,7 +96,7 @@ Flash的实际容量为128Mbits（16M Bytes），但应用开发者该容量无�
 
 <br/>
 
-## BLE接口设计
+## 5 BLE接口设计
 
 ### Service and Characteristic
 
