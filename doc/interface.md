@@ -10,17 +10,18 @@ author: matianfu (at) gingerologist.com
 
 ## Scope and Audience
 
-本文档描述ble audio recorder使用的音频格式，（需要App开发者理解的）存储格式，和蓝牙低功耗访问接口。
+本文档描述BLE Audio Recorder设备固件使用的音频格式，存储方式，和蓝牙低功耗访问接口，包括输出的数据格式和客户端指令。
 
-本文档不包含固件内部设计和测试需求。所有相关软硬件件开发人员和测试人员都应该阅读本文档。
+本文档不包含固件内部设计描述、调试和测试方式（由其它文档描述）。
+
+所有相关软硬件件开发人员和测试人员都应该阅读本文档。
 
 
 
 ## 音频格式
 
-内部存储和输出均使用如下音频格式：
+MEMS Microphone产生的原始数据格式为signed 16bit PCM（Pulse Code Modulation）格式，APP或其它客户端软件解码后也还原成该格式播放；内部存储和输出均使用如下音频格式：
 
-- 原始格式为Signed 16bit PCM（Pulse Code Modulation）格式，APP或其它客户端软件解码后也还原成该格式播放；
 - 存储和接口传输均使用ADPCM（Adaptive Differential PCM）格式，后述；
 - 设备只有一个麦克风，音频数据配置为单声道模式（而不是立体声模式但LR使用同样数据）；
 - 固件内部固定使用16000采样频率，该采样率下单独录音存储和单独蓝牙读取均无问题；
@@ -175,18 +176,18 @@ Status Data里的`recordings`数组，加上`recStart`正好定义了最近21条
 
 `recordings`数组的初始值全部设定为`0xffffffff`，表示这一条记录没有值。`recStart`在初始化的时候设置为0。在一条录音记录都没有的时候，`recordings`和`recStart`如下表所示：
 
-| index                         | value      |
-| ----------------------------- | ---------- |
-| 0                             | 0xffffffff |
-| 1                             | 0xffffffff |
-| ...                           | ...        |
-| 19                            | 0xffffffff |
-| 20 (最后一个`recordings`元素) | 0xffffffff |
-| 21 (实际上是`recStart`)       | 0x00000000 |
+| name                      | value      |
+| ------------------------- | ---------- |
+| recordings[0]             | 0xffffffff |
+| recordings[1]             | 0xffffffff |
+| ...                       | ...        |
+| recordings[19]            | 0xffffffff |
+| recordings[20]            | 0xffffffff |
+| recordings[21] (recStart) | 0x00000000 |
 
 
 
-如果第一段录音占据了5个Sector后录音结束，`recordings`和`recStart`会变成如下状态，表示目前有一段录音，从地址0（包含）开始到地址5（不包含）结束，依次类推。
+如果第一段录音写满了5个Sector后录音结束，`recordings`和`recStart`会变成如下状态，表示目前有一段录音，从地址0（包含）开始到地址5（不包含）结束，依次类推。
 | index                         | value      |
 | ----------------------------- | ---------- |
 | 0                             | 0xffffffff |
@@ -236,6 +237,40 @@ typedef struct __attribute__ ((__packed__)) AdpcmPacket
 
 
 如前所述实际上sample和index这两个数据不是每包必要的，只要`minor`为0的（每个Sector的）第一个包提供即可。但同类型的所有的数据包等长更方便一点。
+
+<br/>
+
+### Command
+
+蓝牙连接建立后，客户端应立刻开启Notification，只有开启Notification后写入的指令才是有效的，如果Notification没有打开，固件程序收到写入的指令后直接丢弃，不会执行。
+
+
+
+当前固件提供5个指令：
+
+1. `NO_OP`，什么也不做（但可以看一下返回的状态）；
+2. `STOP_REC`，停止录音；
+3. `START_REC`，启动录音；
+4. `STOP_READ`，停止读取；
+5. `START_READ`，开始读取；这是唯一一个需要提供额外参数的指令；
+
+执行任何指令后，固件都会返回一个`Status`数据包显示执行命令后设备内部的状态，不额外提供成功失败和错误类型。
+
+#### 编码
+
+| Op Code        | Length | Format and Example                                           |
+| -------------- | ------ | ------------------------------------------------------------ |
+| NO_OP          | 1 byte | `00`                                                         |
+| STOP_REC       | 1 byte | `01`                                                         |
+| START_REC      | 1 byte | `02`                                                         |
+| STOP_READ      | 1 byte | `03`                                                         |
+| START_READ (1) | 1 byte | `04`                                                         |
+| START_READ (2) | 5 byte | `04 02 01 00 00`, read from sector `0x00000102` (to sector `recStart`) |
+| START_READ (3) | 9 byte | `04 02 01 00 00 04 03 00 00 `, read from sector `0x00000102` to sector `0x00000304` (exclusive) |
+
+
+
+
 
 
 
