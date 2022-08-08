@@ -182,32 +182,32 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
 
 #### 5.2.3 Recordings
 
-Status Data里的`recordings`数组，加上`recStart`正好定义了最近21条历史录音记录的分段起始和结束的位置。
+`Status`里的`recordings`数组，算上`recStart`正好定义了最近21条历史录音记录的起始和结束的位置；可以把`recStart`看作`recordings`数组的第22个元素。
 
 
 
-`recordings`数组的初始值全部设定为`0xffffffff`，表示这一条记录没有值。`recStart`在初始化的时候设置为0。在一条录音记录都没有的时候，`recordings`和`recStart`如下表所示：
+设备开始使用时，`recordings`数组元素全部初始化为`0xffffffff`，表示这一条记录没有值。`recStart`在初始化的时候设置为`0`，如下表所示：
 
-| name                      | value      |
-| ------------------------- | ---------- |
-| recordings[0]             | 0xffffffff |
-| recordings[1]             | 0xffffffff |
-| ...                       | ...        |
-| recordings[19]            | 0xffffffff |
-| recordings[20]            | 0xffffffff |
-| recordings[21] (recStart) | 0x00000000 |
+| name                        | value        |
+| --------------------------- | ------------ |
+| `recordings[0]`             | `0xffffffff` |
+| `recordings[1]`             | `0xffffffff` |
+| ...                         | ...          |
+| `recordings[19]`            | `0xffffffff` |
+| `recordings[20]`            | `0xffffffff` |
+| `recordings[21] (recStart)` | `0x00000000` |
 
 
 
-如果第一段录音写满了5个Sector后录音结束，`recordings`和`recStart`会变成如下状态，表示目前有一段录音，从地址0（包含）开始到地址5（不包含）结束，依次类推。
-| index                         | value      |
-| ----------------------------- | ---------- |
-| 0                             | 0xffffffff |
-| 1                             | 0xffffffff |
-| ...                           | ...        |
-| 19                            | 0xffffffff |
-| 20 (最后一个`recordings`元素) | 0x00000000 |
-| 21 (实际上是`recStart`)       | 0x00000005 |
+如果第一段录音写满了5个Sector后录音结束，`recordings`和`recStart`会变成如下表所示状态，表示目前有一段录音，从地址0（包含）开始到地址5（不包含）结束，依次类推。
+| index                       | value        |
+| --------------------------- | ------------ |
+| `recordings[0]`             | `0xffffffff` |
+| `recordings[1]`             | `0xffffffff` |
+| ...                         | ...          |
+| `recordings[19]`            | `0xffffffff` |
+| `recordings[20]`            | `0x00000000` |
+| `recordings[21]（recStart)` | `0x00000005` |
 
 
 
