@@ -223,16 +223,9 @@ static uint8 advHandleLegacy;
 static GAP_Addr_Modes_t addrMode = DEFAULT_ADDRESS_MODE;
 
 static bool subscriptionOn;
-static List_List readingList;
+static List_List pendingOutgoingMsgs;
 
-// static GPTimerCC26XX_Handle hTimer;
 static Clock_Struct notiClock;
-
-//void timerCallback(GPTimerCC26XX_Handle handle,
-//                   GPTimerCC26XX_IntMask interruptMask)
-//{
-//  Event_post(syncEvent, SP_HTIMER_EVT);
-//}
 
 void clockCallback(UArg a0)
 {
@@ -329,7 +322,7 @@ void SimplePeripheral_readable(void)
 
 void sendOutgoingMsg(OutgoingMsg_t* msg)
 {
-  List_put(&readingList, (List_Elem*)msg);
+  List_put(&pendingOutgoingMsgs, (List_Elem*)msg);
   SimplePeripheral_readable(); // TODO
 }
 
@@ -417,7 +410,7 @@ static void SimplePeripheral_init(void)
   Util_constructClock(&notiClock, clockCallback, 10, 1, false, NULL);
 
   subscriptionOn = false;
-  List_clearList(&readingList);
+  List_clearList(&pendingOutgoingMsgs);
 }
 
 /*********************************************************************
@@ -824,7 +817,7 @@ static bool SimplePeripheral_doNotify(int where)
   attHandleValueNoti_t noti;
   bStatus_t status;
 
-  OutgoingMsg_t *msg = (OutgoingMsg_t*)List_head(&readingList);
+  OutgoingMsg_t *msg = (OutgoingMsg_t*)List_head(&pendingOutgoingMsgs);
   if (!msg) return false;
 
   size_t len;
@@ -898,7 +891,7 @@ static void SimplePeripheral_drain(int where)
 //    {
 //      freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
 //    }
-    while (List_head(&readingList))
+    while (List_head(&pendingOutgoingMsgs))
     {
       if (!SimplePeripheral_doNotify(where))
       {
@@ -914,15 +907,15 @@ static void SimplePeripheral_drain(int where)
         {
           Util_stopClock(&notiClock);
         }
-        freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
+        freeOutgoingMsg((OutgoingMsg_t*)List_get(&pendingOutgoingMsgs));
       }
     }
   }
   else
   {
-    while (List_head(&readingList))
+    while (List_head(&pendingOutgoingMsgs))
     {
-      freeOutgoingMsg((OutgoingMsg_t*)List_get(&readingList));
+      freeOutgoingMsg((OutgoingMsg_t*)List_get(&pendingOutgoingMsgs));
     }
   }
 }

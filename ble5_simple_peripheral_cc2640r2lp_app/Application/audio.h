@@ -22,6 +22,26 @@ void Audio_createTask(void);
 void Audio_subscribe();
 void Audio_unsubscribe();
 
+
+#define IMT_NOOP                        (0)
+#define IMT_STOP_REC                    (1)
+#define IMT_START_REC                   (2)
+#define IMT_STOP_READ                   (3)
+#define IMT_START_READ                  (4)
+
+typedef uint32_t IncomingMsgType;
+
+typedef struct IncomingMsg
+{
+  List_Elem* elem;
+  IncomingMsgType type;
+  uint32_t start;
+  uint32_t end;
+} IncomingMsg_t;
+
+void recvIncomingMsg(IncomingMsg_t* msg);
+IncomingMsg_t* allocIncomingMsg(void);
+
 /*
  * Incomming message is actually a uint32_t
  *
@@ -32,7 +52,7 @@ void Audio_unsubscribe();
  *     0xFFFFFFF1 Stop Recording
  *     0xFFFFFFF2 Stop Reading
  */
-extern Mailbox_Handle incomingMailbox;
+// extern Mailbox_Handle incomingMailbox;
 
 #define BADPCM_DATA_SIZE                  160
 #define NUM_RECS                          21
@@ -56,18 +76,19 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
   uint32_t recStart;
   uint32_t recPos;
   uint32_t readStart;
+  uint32_t readEnd;
   uint32_t readPosMajor;
   uint32_t readPosMinor;
 } StatusPacket_t;
 
-_Static_assert(sizeof(StatusPacket_t) == 108, "wrong status packet size");
+_Static_assert(sizeof(StatusPacket_t) == 112, "wrong status packet size");
 
 /*
  * for alignment inside struct, OutgoingMsgType is defined to uint32_t,
  * rather than being defined as enum.
  */
-#define OMT_STATUS                (0)
-#define OMT_BADPCM                (1)
+#define OMT_STATUS                        (0)
+#define OMT_BADPCM                        (1)
 
 typedef uint32_t OutgoingMsgType;
 

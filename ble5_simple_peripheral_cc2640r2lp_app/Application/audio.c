@@ -124,22 +124,6 @@
    UART_TX_RDY_EVT | UART_RX_RDY_EVT | AUDIO_INCOMING_MSG | AUDIO_OUTGOING_MSG | \
    AUDIO_REC_AUTOSTOP | AUDIO_BLE_SUBSCRIBE | AUDIO_BLE_UNSUBSCRIBE )
 
-/*
- * Incomming message is actually a uint32_t
- *
- *
- * 0 - 0xFFFFFFEE Start Reading
- *     0xFFFFFFEF Start Recording
- *     0xFFFFFFF0 Status
- *     0xFFFFFFF1 Stop Recording
- *     0xFFFFFFF2 Stop Reading
- */
-#define IM_START_READ                     (0xfffffffb)
-#define IM_STOP_READ                      (0xfffffffc)    //  -4
-#define IM_START_REC                      (0xfffffffd)    //  -3
-#define IM_STOP_REC                       (0xfffffffe)    //  -2
-#define IM_STATUS                         (0xffffffff)    //  -1
-
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
 #define SECT_COUNT                        (FLASH_SIZE / SECT_SIZE)
@@ -236,6 +220,7 @@ typedef struct ctx
   bool recording;
 
   uint32_t readStart;
+  uint32_t readEnd;
   uint32_t readPosMajor;
   uint32_t readPosMinor;
   AdpcmState_t readAdpcmState;
@@ -309,13 +294,16 @@ Display_Handle    dispHandle;
 #endif
 
 Event_Handle audioEvent;
-Mailbox_Handle incomingMailbox;
 
 OutgoingMsg_t outmsg[1];
+IncomingMsg_t inmsg[2];
 
-// TODO
 static Semaphore_Handle semOutgoingMsgFreed;
 static List_List freeOutgoingMsgs;
+
+static Semaphore_Handle semIncomingMsgPending;
+static List_List pendingIncomingMsgs;
+static List_List freeIncomingMsgs;
 
 
 /*********************************************************************
@@ -467,16 +455,27 @@ static void Audio_init(void)
   semParams.eventId = AUDIO_PCM_EVT;
   semDataReadyForTreatment = Semaphore_create(0, &semParams, Error_IGNORE);
 
-  Mailbox_Params mboxParams;
-  Mailbox_Params_init(&mboxParams);
-  mboxParams.readerEvent = audioEvent;
-  mboxParams.readerEventId = AUDIO_INCOMING_MSG;
-  incomingMailbox = Mailbox_create(sizeof(uint32_t), 4, &mboxParams, Error_IGNORE);
+//  Mailbox_Params mboxParams;
+//  Mailbox_Params_init(&mboxParams);
+//  mboxParams.readerEvent = audioEvent;
+//  mboxParams.readerEventId = AUDIO_INCOMING_MSG;
+//  incomingMailbox = Mailbox_create(sizeof(uint32_t), 4, &mboxParams, Error_IGNORE);
+
+  Semaphore_Params_init(&semParams);
+  semParams.event = audioEvent;
+  semParams.eventId = AUDIO_INCOMING_MSG;
+  semIncomingMsgPending = Semaphore_create(0, &semParams, Error_IGNORE);
 
   Semaphore_Params_init(&semParams);
   semParams.event = audioEvent;
   semParams.eventId = AUDIO_OUTGOING_MSG;
   semOutgoingMsgFreed = Semaphore_create(1, &semParams, Error_IGNORE);
+
+  List_clearList(&freeIncomingMsgs);
+  List_put(&freeIncomingMsgs, (List_Elem*)&inmsg[0]);
+  List_put(&freeIncomingMsgs, (List_Elem*)&inmsg[1]);
+
+  List_clearList(&pendingIncomingMsgs);
 
   List_clearList(&freeOutgoingMsgs);
   List_put(&freeOutgoingMsgs, (List_Elem*)&outmsg[0]);
@@ -736,6 +735,11 @@ static void Audio_taskFxn(UArg a0, UArg a1)
       }
     }
 
+    if (event & AUDIO_INCOMING_MSG)
+    {
+      Semaphore_pend(semIncomingMsgPending, 0);
+    }
+
     if (event & AUDIO_OUTGOING_MSG)
     {
       Semaphore_pend(semOutgoingMsgFreed, 0);
@@ -746,32 +750,31 @@ static void Audio_taskFxn(UArg a0, UArg a1)
       /* when space available */
       while (List_head(&freeOutgoingMsgs))
       {
-        if (Mailbox_getNumPendingMsgs(incomingMailbox))
+        IncomingMsg_t *msg = (IncomingMsg_t*)List_get(&pendingIncomingMsgs);
+        if (msg)
         {
-          uint32_t msg;
-          Mailbox_pend(incomingMailbox, &msg, 0);
+          Display_print2(dispHandle, 0xff, 0, "incoming msg %d (%08x)", msg->type, msg->type);
 
-          Display_print2(dispHandle, 0xff, 0, "incoming msg %d (%08x)", msg, msg);
-
-          if (msg <= IM_START_READ)
-          {
-            Display_print0(dispHandle, 0xff, 0, "start reading");
-            ctx.readStart = msg;
-            ctx.readPosMajor  = msg;
-            ctx.readPosMinor = 0;
-            ctx.reading = true;
-          }
-          else if (msg == IM_START_REC)
+          if (msg->type == IMT_START_REC)
           {
             Display_print0(dispHandle, 0xff, 0, "start recording");
             startRecording();
           }
-          else if (msg == IM_STOP_REC)
+          else if (msg->type == IMT_STOP_REC)
           {
             Display_print0(dispHandle, 0xff, 0, "stop recording");
             stopRecording();
           }
-          else if (msg == IM_STOP_READ)
+          else if (msg->type == IMT_START_READ)
+          {
+            Display_print0(dispHandle, 0xff, 0, "start reading");
+            ctx.readStart = msg->start;
+            ctx.readEnd = msg->end;
+            ctx.readPosMajor  = ctx.readStart;
+            ctx.readPosMinor = 0;
+            ctx.reading = true;
+          }
+          else if (msg->type == IMT_STOP_READ)
           {
             Display_print0(dispHandle, 0xff, 0, "stop reading");
             ctx.reading = false;
@@ -781,15 +784,27 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         }
         else if (ctx.reading)
         {
-          if (ctx.readPosMajor >= ctx.recPos)
+          if (ctx.readStart >= ctx.recStart)  // live
           {
-            if (!ctx.recording)
+            if (ctx.readPosMajor >= ctx.recPos) // break if blocked, stop if rec stopped
             {
-              Display_print0(dispHandle, 0xff, 0, "stop (forward) reading  when recording stopped ");
+              if (!ctx.recording)
+              {
+                Display_print0(dispHandle, 0xff, 0, "stop (forward) reading when recording stopped.");
+                ctx.reading = false;
+                sendStatusMsg();
+              }
+              break;
+            }
+          }
+          else
+          {
+            if (ctx.readPosMajor >= ctx.recStart || ctx.readPosMajor >= ctx.readEnd)
+            {
+              Display_print0(dispHandle, 0xff, 0, "stop reading when reaching rec start or read end.");
               ctx.reading = false;
               sendStatusMsg();
             }
-            break;
           }
 
           /*
@@ -871,16 +886,17 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         }
       }
     }
-    else
+    else  // subscriptionOn == false
     {
-      if (Mailbox_getNumPendingMsgs(incomingMailbox))
+      List_Elem* msg;
+      while (msg = List_get(&pendingIncomingMsgs))
       {
-        uint32_t msg;
-        while (Mailbox_pend(incomingMailbox, &msg, 0))
-        {
-          Display_print2(dispHandle, 0xff, 0, "incoming msg %d (%08x) discarded", msg, msg);
-        }
+        List_put(&freeIncomingMsgs, msg);
+        Display_print2(dispHandle, 0xff, 0, "incoming msg %d (%08x) discarded",
+                       ((IncomingMsg_t* )msg)->type,
+                       ((IncomingMsg_t* )msg)->type);
       }
+
     }
 
 #if defined(LOG_ADPCM_DATA) && defined (LOG_NVS_AFTER_AUTOSTOP)
@@ -1396,6 +1412,7 @@ static void sendStatusMsg(void)
   outmsg->status.recStart = ctx.recStart;
   outmsg->status.recPos = ctx.recPos;
   outmsg->status.readStart = ctx.readStart;
+  outmsg->status.readEnd = ctx.readEnd;
   outmsg->status.readPosMajor = ctx.readPosMajor;
   outmsg->status.readPosMinor = ctx.readPosMinor;
   outmsg->status.flags = ctx.recording ? 1 : 0 + ctx.reading ? 2 : 0;
@@ -1417,5 +1434,16 @@ static void sendStatusMsg(void)
 #endif
 
   sendOutgoingMsg(outmsg);
+}
+
+void recvIncomingMsg(IncomingMsg_t* msg)
+{
+  List_put(&pendingIncomingMsgs, (List_Elem*)msg);
+  Event_post(audioEvent, AUDIO_INCOMING_MSG);
+}
+
+IncomingMsg_t* allocIncomingMsg(void)
+{
+  return (IncomingMsg_t*)List_get(&freeIncomingMsgs);
 }
 

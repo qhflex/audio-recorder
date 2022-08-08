@@ -333,6 +333,29 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
   return (status);
 }
 
+bool commandIsValid(uint8_t* pValue, uint16_t len)
+{
+  if (len == 1)
+  {
+    return (pValue[0] <= IMT_START_READ);
+  }
+  else if (len == 5)
+  {
+    return (pValue[0] == IMT_START_READ);
+  }
+  else if (len == 9)
+  {
+    uint32_t s, e;
+    memcpy(&s, &pValue[1], 4);
+    memcpy(&e, &pValue[5], 4);
+    return s < e;
+  }
+  else
+  {
+    return false;
+  }
+}
+
 /*********************************************************************
  * @fn      simpleProfile_WriteAttrCB
  *
@@ -397,7 +420,40 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
       // Make sure it's not a blob operation
       if (offset == 0)
       {
-        if (len != 4)
+        if (len == 1 || len == 5 || len == 9)
+        {
+          if (commandIsValid(pValue, len))
+          {
+            IncomingMsg_t *msg = allocIncomingMsg();
+            if (msg)
+            {
+              memset(msg, 0, sizeof(IncomingMsg_t));
+              msg->type = pValue[0];
+
+              if (len == 5 || len == 9)
+              {
+                memcpy(&msg->start, &pValue[1], 4);
+                msg->end = 0xffffffff;
+              }
+
+              if (len == 9)
+              {
+                memcpy(&msg->end, &pValue[5], 4);
+              }
+
+              recvIncomingMsg(msg);
+            }
+            else
+            {
+              status = ATT_ERR_INSUFFICIENT_RESOURCES;
+            }
+          }
+          else
+          {
+            status = ATT_ERR_INVALID_VALUE;
+          }
+        }
+        else
         {
           status = ATT_ERR_INVALID_VALUE_SIZE;
         }
@@ -405,14 +461,6 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
       else
       {
         status = ATT_ERR_ATTR_NOT_LONG;
-      }
-
-      if (status == SUCCESS)
-      {
-        if (!Mailbox_post(incomingMailbox, pValue, 0))
-        {
-          status = ATT_ERR_INSUFFICIENT_RESOURCES;
-        }
       }
       break;
 

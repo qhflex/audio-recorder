@@ -4,7 +4,10 @@
 
 author: matianfu (at) gingerologist.com
 
-2022-08-07, initial version, draft
+| 日期       | 改动                                                         |
+| ---------- | ------------------------------------------------------------ |
+| 2022-08-07 | 初稿，草稿；                                                 |
+| 2022-08-08 | 修改了`Status`数据结构，增加`readEnd`属性，数据包大小增加4字节，达到112字节；`START_READ`命令的说明中增加了部分内容； |
 
 </br>
 
@@ -28,7 +31,7 @@ MEMS Microphone生成的原始数据格式为Signed 16bit PCM（Pulse Code Modul
 
 </br>
 
-### ADPCM说明
+### 3.1 ADPCM说明
 
 ADPCM使用一个近似值查表的方法实现有损压缩数据，压缩比固定为`4:1`，即每个16bit PCM Sample压缩成4bit。
 
@@ -115,7 +118,7 @@ Notification是固件向客户端程序传输数据的唯一方式。（因为�
 
 <br/>
 
-固件提供两种Notification数据格式：一种是状态数据（`Status`），客户端写入任何命令固件都会返回`Status`；另一种是ADPCM格式的语音数据（`ADPCM_DATA`），客户端发出读取录音数据指令（`START_READ`）后会获得连续的语音数据包数据返回。`Status`和`ADPCM_DATA`均为固定长度，前者108字节，后者168字节，客户端可根据大小判定获得的数据是哪种格式。
+固件提供两种Notification数据格式：一种是状态数据（`Status`），客户端写入任何命令固件都会返回`Status`；另一种是ADPCM格式的语音数据（`ADPCM_DATA`），客户端发出读取录音数据指令（`START_READ`）后会获得连续的语音数据包数据返回。`Status`和`ADPCM_DATA`均为固定长度，前者112字节，后者168字节，客户端可根据大小判定获得的数据是哪种格式。
 
 <br/>
 
@@ -141,7 +144,7 @@ Notification是固件向客户端程序传输数据的唯一方式。（因为�
 
 #### 5.2.2 状态（`Status`）
 
-`Status`的C语言结构体定义如下，`recordings`数组包含21个元素，含义后述；`Status`数据结构的总大小为108字节，共包含27个`uint32_t`类型数据。
+`Status`的C语言结构体定义如下，`recordings`数组包含21个元素，含义后述；`Status`数据结构的总大小为112字节，共包含28个`uint32_t`类型数据。
 
 ```C
 #define NUM_RECS				21
@@ -151,6 +154,7 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
   uint32_t flags; 
   uint32_t recordings[NUM_RECS];
   uint32_t recStart;
+  uint32_t recEnd;
   uint32_t recPos;
   uint32_t readStart;
   uint32_t readPosMajor;
@@ -171,6 +175,7 @@ typedef struct __attribute__ ((__packed__)) StatusPacket
   - 如果当前不在录音，即`recording`标记为0，`recStart`和`recPos`是相等的，指向下一次录音开始的第一个sector地址；
 - 读取录音
   - `readStart`是当前读取命令给的原始参数，该参数不会自动调整，即使它小于当前尚未被覆盖的最小的Sector地址；
+  - `readEnd`是当前读取命令给的原始参数，该参数不会自动调整，即使它大于当前最后的录音记录位置（`recPos`）；
   - `readPosMajor`是当前在读取的Sector地址；
   - `readPosMinor`是当前在读取的Sector内的读取单元的index；一个Sector有4000个字节音频数据，每个ADPCM数据包只包含160个ADPCM数据，所以`readPosMinor`的实际取值范围是0-24，即4000字节的数据要拆成25个包发送；
 
@@ -266,7 +271,7 @@ typedef struct __attribute__ ((__packed__)) ADPCM_DATA
 
 <br/>
 
-#### 编码
+#### 5.3.1 编码
 
 | Op Code          | Length | Format and Example                                           |
 | ---------------- | ------ | ------------------------------------------------------------ |
@@ -280,7 +285,16 @@ typedef struct __attribute__ ((__packed__)) ADPCM_DATA
 
 
 
-`START_READ`提供了3种格式，前面两种可以看作第三种的简略格式；第三种格式需提供读取录音的起始sector和结束sector的地址（起始包含结束不包含）；第二种格式不提供结束值，结束值被自动设定为`recStart`，即最后一段已结束的录音的结束点；第一种格式不提供起始和结束，起始会被当作0处理，并自动调整到最早的未覆盖录音数据发送；结束点会自动设定未`recStart`。使用第一种格式，如果不发生传输中断的话，可以一次型提取设备内所有录音数据。
+`START_READ`提供了3种格式，前面两种可以看作第三种的简略格式。
+
+- 第三种格式需提供读取录音的起始sector地址（inclusive）和结束sector地址（exclusive），如果选择该格式，要求起始地址小于结束地址。
+
+- 第二种格式不提供结束值，结束值自动设为`0xffffffff`。
+- 第一种格式不提供起始和结束，起始会设为0，结束设为`0xffffffff`。
+
+读取开始后，如果`readStart`早于最早的未被覆盖录音存储位置，`readStart`会被自动调整到该位置开始；读取到`readPosMajor`大于等于`recStart`和`readEnd`两者中较小的值时结束，所以`readEnd`不存在非法值，如果它大于当前最后一段（已完成的）录音数据的结束点，读取操作就会到此停止。
+
+使用第一种格式，如果不发生传输中断的话，可以一次提取设备内所有录音数据。
 
 <br/>
 
