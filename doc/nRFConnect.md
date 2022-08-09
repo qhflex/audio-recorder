@@ -52,7 +52,7 @@ LightBlue操作简单，界面设计也更直觉友好，但对于BLE Audio Reco
 ### MTU negotiation
 在主界面上点击左上角的菜单按钮打开侧面的菜单，选择`Settings`，选择`Connectivity`，然后打开`Auto requst maximum MTU`功能；该功能缺省是关闭的。必须打开该功能才能正常通讯，否则Notification发出的两种数据包都无法接收完整。
 
-![20220809-140943](/data/qhflex/audio-recorder/doc/20220809-140943.jpg)![20220809-140950](/data/qhflex/audio-recorder/doc/20220809-140950.jpg)![20220809-140954](/data/qhflex/audio-recorder/doc/20220809-140954.jpg)
+![20220809-140943](20220809-140943.jpg) ![20220809-140950](20220809-140950.jpg) ![20220809-140954](20220809-140954.jpg)
 
 
 
