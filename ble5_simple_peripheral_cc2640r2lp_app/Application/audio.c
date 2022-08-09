@@ -753,7 +753,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
         IncomingMsg_t *msg = (IncomingMsg_t*)List_get(&pendingIncomingMsgs);
         if (msg)
         {
-          Display_print2(dispHandle, 0xff, 0, "incoming msg %d (%08x)", msg->type, msg->type);
+          Display_print1(dispHandle, 0xff, 0, "incoming msg (command) %d", msg->type);
 
           if (msg->type == IMT_START_REC)
           {
@@ -779,6 +779,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
             Display_print0(dispHandle, 0xff, 0, "stop reading");
             ctx.reading = false;
           }
+          List_put(&freeIncomingMsgs, (List_Elem*)msg);
 
           sendStatusMsg();
         }
@@ -804,6 +805,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
               Display_print0(dispHandle, 0xff, 0, "stop reading when reaching rec start or read end.");
               ctx.reading = false;
               sendStatusMsg();
+              break;
             }
           }
 
@@ -1416,8 +1418,41 @@ static void sendStatusMsg(void)
   outmsg->status.readPosMajor = ctx.readPosMajor;
   outmsg->status.readPosMinor = ctx.readPosMinor;
   outmsg->status.flags = ctx.recording ? 1 : 0 + ctx.reading ? 2 : 0;
-
   outmsg->type = OMT_STATUS;
+
+
+#ifndef Display_DISABLE_ALL
+  Display_print5(dispHandle, 0xff, 0, "status: recordings %08x %08x %08x %08x %08x",
+                 outmsg->status.recordings[0], outmsg->status.recordings[1],
+                 outmsg->status.recordings[2], outmsg->status.recordings[3],
+                 outmsg->status.recordings[4]);
+  Display_print5(dispHandle, 0xff, 0, "                   %08x %08x %08x %08x %08x",
+                 outmsg->status.recordings[5], outmsg->status.recordings[6],
+                 outmsg->status.recordings[7], outmsg->status.recordings[8],
+                 outmsg->status.recordings[9]);
+  Display_print5(dispHandle, 0xff, 0, "                   %08x %08x %08x %08x %08x",
+                 outmsg->status.recordings[10], outmsg->status.recordings[11],
+                 outmsg->status.recordings[12], outmsg->status.recordings[13],
+                 outmsg->status.recordings[14]);
+  Display_print5(dispHandle, 0xff, 0, "                   %08x %08x %08x %08x %08x",
+                 outmsg->status.recordings[15], outmsg->status.recordings[16],
+                 outmsg->status.recordings[17], outmsg->status.recordings[18],
+                 outmsg->status.recordings[19]);
+  Display_print1(dispHandle, 0xff, 0, "                   %08x",
+                 outmsg->status.recordings[20]);
+  Display_print3(dispHandle, 0xff, 0,
+                 "        recording: %d, recStart %08x, recPos %08x",
+                 outmsg->status.flags & 0x00000001, outmsg->status.recStart,
+                 outmsg->status.recPos);
+  Display_print5(dispHandle, 0xff, 0,
+                 "        reading: %d, readStart %08x, "
+                 "readEnd %08x, major: %08x, minor %08x",
+                 outmsg->status.flags & 0x00000002,
+                 outmsg->status.readStart,
+                 outmsg->status.readEnd,
+                 outmsg->status.readPosMajor,
+                 outmsg->status.readPosMinor);
+#endif
 
 #ifdef LOG_BADPCM_DATA
   Semaphore_pend(semUartTxReady, BIOS_WAIT_FOREVER);

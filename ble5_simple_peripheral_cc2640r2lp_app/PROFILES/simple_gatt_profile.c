@@ -430,14 +430,19 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
               memset(msg, 0, sizeof(IncomingMsg_t));
               msg->type = pValue[0];
 
-              if (len == 5 || len == 9)
+              if (len == 1)
+              {
+                msg->start = 0;
+                msg->end = 0xffffffff;
+              }
+              else if (len == 5)
               {
                 memcpy(&msg->start, &pValue[1], 4);
                 msg->end = 0xffffffff;
               }
-
-              if (len == 9)
+              else if (len == 9)
               {
+                memcpy(&msg->start, &pValue[1], 4);
                 memcpy(&msg->end, &pValue[5], 4);
               }
 

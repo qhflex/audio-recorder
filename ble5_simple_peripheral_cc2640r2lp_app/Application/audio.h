@@ -33,7 +33,7 @@ typedef uint32_t IncomingMsgType;
 
 typedef struct IncomingMsg
 {
-  List_Elem* elem;
+  List_Elem elem;
   IncomingMsgType type;
   uint32_t start;
   uint32_t end;
