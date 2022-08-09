@@ -44,19 +44,34 @@ LightBlue操作简单，界面设计也更直觉友好，但对于BLE Audio Reco
 
 ## 3 nRF Connect使用
 
-### PHY rate
+### 3.1 PHY rate
 在搜索和连接界面上，nRF Connect允许用户选择PHY设置，如下图所示。点击`connect`按钮上右侧的`more`（竖排的三个圆点）图标，选择`Connect with preferred PHY`可以指定使用的PHY rate。理论上强制LE 2M应该传输速度更快，实际上只有手机和Microphone靠的很近的时候比较明显；固件开发者不建议在使用nRF Connect调试时手工设定PHY rate，该软件可以自动调整PHY rate，可以在该软件的Log里看到PHY rate的变化（在1M和2M之间来回切换）。
 
-<img src="20220809-134445.jpg"/> <img src="20220809-134456.jpg"/>
+![](20220809-134445.jpg) ![](20220809-134456.jpg)
 
-### MTU negotiation
+### 3.2 MTU negotiation
 在主界面上点击左上角的菜单按钮打开侧面的菜单，选择`Settings`，选择`Connectivity`，然后打开`Auto requst maximum MTU`功能；该功能缺省是关闭的。必须打开该功能才能正常通讯，否则Notification发出的两种数据包都无法接收完整。
 
 ![20220809-140943](20220809-140943.jpg) ![20220809-140950](20220809-140950.jpg) ![20220809-140954](20220809-140954.jpg)
 
 
 
+### 3.3 连接设备
+回到主界面，点击`connect`按钮，和设备建立蓝牙连接，如下图所示。和大多数BLE调试程序不同，nRF Connect以最“原始”的方式显示数据。在BLE数据协议设计上，数据和用于描述数据的元数据（`metadata`）使用同样格式；蓝牙标准使用预定义ID（或UUID）的值表达特殊属性。例如图中短ID`0x1800`表示Generic Access服务，`0x1801`表示Generic Attribute服务。
 
+<br/>
+
+图中显示为Unknown Service的是设备固件自定义的蓝牙服务，使用128bit长ID（即UUID）。点开后可以看到该服务包含了一个自定义的Characteristic，它包含两个描述符；其中`0x2902`是Client Characteristic Configuration，即CCCD，是用于实现Notification/Indication的。所谓客户端打开Notification（在LightBlue里称之为subscribe），即是客户端向该属性写入值。CCCD是每客户端状态，如果设备支持多个蓝牙客户端同时建立连接，一个客户端写入CCCD的值仅对它自己有效，即一个客户端打开Notification后，Char的值变化仅会发送给该客户端，不会发送给其它同时建立蓝牙连接的客户端。
+
+<br/>
+
+`0x2901`对应的Characteristic User Description描述符就是该Char的名字，点击读按钮（向下的箭头加一个横线是读，向上的箭头加一个横线是写，多个向下的箭头是打开Notification），可以看到这个Char的名字是`audio`，在大多数BLE调试程序里都会自动解析这个值并直接显示在Characteristic上（而不是显示Unknown Characteristic），但nRF Connect主要是给BLE固件开发工程师使用的，它让开发者更容易看到哪里配置错了。
+
+<br />
+
+最后要说明的是注意Unknown Characteristic下面有一行Properties的小字，后面写着NOTIFY和WRITE，表示该Char支持这两种BLE操作。固件程序约定，必须打开Notification，WRITE操作才执行，否则输入的数据都会被抛弃。
+
+![](20220809-191953.jpg) ![](20220809-192005.jpg)
 
 
 

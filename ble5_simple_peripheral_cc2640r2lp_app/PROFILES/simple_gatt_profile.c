@@ -101,7 +101,7 @@ extern ICall_EntityID selfEntity;
  */
 
 // Simple Profile Service attribute
-static CONST gattAttrType_t simpleProfileService = { ATT_BT_UUID_SIZE,
+static CONST gattAttrType_t simpleProfileService = { ATT_UUID_SIZE,
                                                      simpleProfileServUUID };
 
 // Simple Profile Characteristic 4 Properties
