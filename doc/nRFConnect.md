@@ -44,9 +44,15 @@ LightBlue操作简单，界面设计也更直觉友好，但对于BLE Audio Reco
 
 ## 3 nRF Connect使用
 
+### PHY rate
 在搜索和连接界面上，nRF Connect允许用户选择PHY设置，如下图所示。点击`connect`按钮上右侧的`more`（竖排的三个圆点）图标，选择`Connect with preferred PHY`可以指定使用的PHY rate。理论上强制LE 2M应该传输速度更快，实际上只有手机和Microphone靠的很近的时候比较明显；固件开发者不建议在使用nRF Connect调试时手工设定PHY rate，该软件可以自动调整PHY rate，可以在该软件的Log里看到PHY rate的变化（在1M和2M之间来回切换）。
 
-<img src="20220809-134438.jpg" /> <img src="20220809-134445.jpg"/> <img src="20220809-134456.jpg"/>
+<img src="20220809-134445.jpg"/> <img src="20220809-134456.jpg"/>
+
+### MTU negotiation
+在主界面上点击左上角的菜单按钮打开侧面的菜单，选择`Settings`，选择`Connectivity`，然后打开`Auto requst maximum MTU`功能；该功能缺省是关闭的。必须打开该功能才能正常通讯，否则Notification发出的两种数据包都无法接收完整。
+
+![20220809-140943](/data/qhflex/audio-recorder/doc/20220809-140943.jpg)![20220809-140950](/data/qhflex/audio-recorder/doc/20220809-140950.jpg)![20220809-140954](/data/qhflex/audio-recorder/doc/20220809-140954.jpg)
 
 
 
