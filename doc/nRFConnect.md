@@ -75,5 +75,91 @@ LightBlue操作简单，界面设计也更直觉友好，但对于BLE Audio Reco
 
 
 
+### 3.4 启动后的设备日志打印
 
+如果连接了串口到PC，当前固件版本能看到设备启动后从串口输出的打印信息。
+
+- `counter`是从Flash载入的当前即将写入的sector地址；
+- `recordings`是从Flash载入的录音分段信息；
+- `recStart`和`recPos`是初始化的（即将开始的）录音的起始点；以上可参考接口说明文档；
+
+<br/>
+
+录音时写入flash的操作的详细信息都有打印输出（nvs write, nvs erase, etc）；当前固件内部有设置一次录音的最长时间为10秒钟，该设置最终会取消，在调试初期为防止程序错误导致无限循环录音设置此值，10秒钟的录音足够调试使用了。在串口看到打印停止后即可执行蓝牙操作。不停止也可以操作但是就要回卷屏幕查找所需的打印信息了。
+
+```
+counter     : 0x00000571
+recordings  : 0x00000478 0x0000048c 0x0000048d 0x000004a1 0x000004a2
+              0x000004b6 0x000004b7 0x000004cb 0x000004cc 0x000004e0
+              0x000004e1 0x000004f5 0x000004f6 0x0000050a 0x0000050b
+              0x0000051f 0x00000520 0x00000534 0x00000535 0x00000549
+              0x0000055d
+recStart    : 0x00000571
+recPos      : 0x00000571
+event       : AUDIO_START_REC
+ - nvs write, pos 0x00000571, cnt 000003, cntInSect 03, offset 0x00571000 (%4k 0000), size 256
+ - nvs write, pos 0x00000571, cnt 000007, cntInSect 07, offset 0x00571100 (%4k 0256), size 160
+ - nvs write, pos 0x00000571, cnt 000011, cntInSect 11, offset 0x005711a0 (%4k 0416), size 160
+ - nvs write, pos 0x00000571, cnt 000015, cntInSect 15, offset 0x00571240 (%4k 0576), size 160
+ - nvs write, pos 0x00000571, cnt 000019, cntInSect 19, offset 0x005712e0 (%4k 0736), size 160
+ - nvs write, pos 0x00000571, cnt 000023, cntInSect 23, offset 0x00571380 (%4k 0896), size 160
+ - nvs write, pos 0x00000571, cnt 000027, cntInSect 27, offset 0x00571420 (%4k 1056), size 160
+ - nvs write, pos 0x00000571, cnt 000031, cntInSect 31, offset 0x005714c0 (%4k 1216), size 160
+ - nvs write, pos 0x00000571, cnt 000035, cntInSect 35, offset 0x00571560 (%4k 1376), size 160
+ - nvs write, pos 0x00000571, cnt 000039, cntInSect 39, offset 0x00571600 (%4k 1536), size 160
+ - nvs write, pos 0x00000571, cnt 000043, cntInSect 43, offset 0x005716a0 (%4k 1696), size 160
+ - nvs write, pos 0x00000571, cnt 000047, cntInSect 47, offset 0x00571740 (%4k 1856), size 160
+ - nvs write, pos 0x00000571, cnt 000051, cntInSect 51, offset 0x005717e0 (%4k 2016), size 160
+ - nvs write, pos 0x00000571, cnt 000055, cntInSect 55, offset 0x00571880 (%4k 2176), size 160
+ - nvs write, pos 0x00000571, cnt 000059, cntInSect 59, offset 0x00571920 (%4k 2336), size 160
+ - nvs write, pos 0x00000571, cnt 000063, cntInSect 63, offset 0x005719c0 (%4k 2496), size 160
+ - nvs write, pos 0x00000571, cnt 000067, cntInSect 67, offset 0x00571a60 (%4k 2656), size 160
+ - nvs write, pos 0x00000571, cnt 000071, cntInSect 71, offset 0x00571b00 (%4k 2816), size 160
+ - nvs write, pos 0x00000571, cnt 000075, cntInSect 75, offset 0x00571ba0 (%4k 2976), size 160
+ - nvs write, pos 0x00000571, cnt 000079, cntInSect 79, offset 0x00571c40 (%4k 3136), size 160
+ - nvs write, pos 0x00000571, cnt 000083, cntInSect 83, offset 0x00571ce0 (%4k 3296), size 160
+ - nvs write, pos 0x00000571, cnt 000087, cntInSect 87, offset 0x00571d80 (%4k 3456), size 160
+ - nvs write, pos 0x00000571, cnt 000091, cntInSect 91, offset 0x00571e20 (%4k 3616), size 160
+ - nvs write, pos 0x00000571, cnt 000095, cntInSect 95, offset 0x00571ec0 (%4k 3776), size 160
+ - nvs write, pos 0x00000571, cnt 000099, cntInSect 99, offset 0x00571f60 (%4k 3936), size 160
+new sector  : pos 0x00000572, counter 0x00000572
+ - nvs erase,     0x00572000 (%4k 0)
+
+(omitted)
+
+ - nvs write, pos 0x00000584, cnt 001903, cntInSect 03, offset 0x00584000 (%4k 0000), size 256
+ - nvs write, pos 0x00000584, cnt 001907, cntInSect 07, offset 0x00584100 (%4k 0256), size 160
+ - nvs write, pos 0x00000584, cnt 001911, cntInSect 11, offset 0x005841a0 (%4k 0416), size 160
+ - nvs write, pos 0x00000584, cnt 001915, cntInSect 15, offset 0x00584240 (%4k 0576), size 160
+ - nvs write, pos 0x00000584, cnt 001919, cntInSect 19, offset 0x005842e0 (%4k 0736), size 160
+ - nvs write, pos 0x00000584, cnt 001923, cntInSect 23, offset 0x00584380 (%4k 0896), size 160
+ - nvs write, pos 0x00000584, cnt 001927, cntInSect 27, offset 0x00584420 (%4k 1056), size 160
+ - nvs write, pos 0x00000584, cnt 001931, cntInSect 31, offset 0x005844c0 (%4k 1216), size 160
+ - nvs write, pos 0x00000584, cnt 001935, cntInSect 35, offset 0x00584560 (%4k 1376), size 160
+ - nvs write, pos 0x00000584, cnt 001939, cntInSect 39, offset 0x00584600 (%4k 1536), size 160
+ - nvs write, pos 0x00000584, cnt 001943, cntInSect 43, offset 0x005846a0 (%4k 1696), size 160
+ - nvs write, pos 0x00000584, cnt 001947, cntInSect 47, offset 0x00584740 (%4k 1856), size 160
+ - nvs write, pos 0x00000584, cnt 001951, cntInSect 51, offset 0x005847e0 (%4k 2016), size 160
+ - nvs write, pos 0x00000584, cnt 001955, cntInSect 55, offset 0x00584880 (%4k 2176), size 160
+ - nvs write, pos 0x00000584, cnt 001959, cntInSect 59, offset 0x00584920 (%4k 2336), size 160
+ - nvs write, pos 0x00000584, cnt 001963, cntInSect 63, offset 0x005849c0 (%4k 2496), size 160
+ - nvs write, pos 0x00000584, cnt 001967, cntInSect 67, offset 0x00584a60 (%4k 2656), size 160
+ - nvs write, pos 0x00000584, cnt 001971, cntInSect 71, offset 0x00584b00 (%4k 2816), size 160
+ - nvs write, pos 0x00000584, cnt 001975, cntInSect 75, offset 0x00584ba0 (%4k 2976), size 160
+ - nvs write, pos 0x00000584, cnt 001979, cntInSect 79, offset 0x00584c40 (%4k 3136), size 160
+ - nvs write, pos 0x00000584, cnt 001983, cntInSect 83, offset 0x00584ce0 (%4k 3296), size 160
+ - nvs write, pos 0x00000584, cnt 001987, cntInSect 87, offset 0x00584d80 (%4k 3456), size 160
+ - nvs write, pos 0x00000584, cnt 001991, cntInSect 91, offset 0x00584e20 (%4k 3616), size 160
+ - nvs write, pos 0x00000584, cnt 001995, cntInSect 95, offset 0x00584ec0 (%4k 3776), size 160
+ - nvs write, pos 0x00000584, cnt 001999, cntInSect 99, offset 0x00584f60 (%4k 3936), size 160
+new sector  : pos 0x00000585, counter 0x00000585
+ - nvs erase,     0x00585000 (%4k 0)
+max rec sect reached, before stopRecording(). start 0x00000571, pos 0x00000585
+                      after  stopRecording(). start 0x00000585, pos 0x00000585
+
+```
+
+<br/>
+
+### 3.5 查看Status
 

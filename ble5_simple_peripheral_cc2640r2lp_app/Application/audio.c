@@ -534,30 +534,24 @@ static void Audio_taskFxn(UArg a0, UArg a1)
   Audio_init();
 
   loadCounter();
-  Display_print2(dispHandle, 0xff, 0, "monotonic counter loaded, %d (%08x)",
-                 MONOTONIC_COUNTER, MONOTONIC_COUNTER);
+  Display_print1(dispHandle, 0xff, 0, "counter     : %08x", MONOTONIC_COUNTER);
 
   loadRecordings();
-  Display_print0(dispHandle, 0xff, 0, "prevs loaded");
-
-#ifndef Display_DISABLE_ALL
-  for (int i = 0; i < NUM_RECS + 2; i++)
-  {
-    uint32_t x = ctx.recordings[i];
-    if (i < NUM_RECS)
-    {
-      Display_print2(dispHandle, 0xff, 0, "      %d (0x%08x)", x, x);
-    }
-    else if (i == NUM_RECS)
-    {
-      Display_print2(dispHandle, 0xff, 0, "start %d (0x%08x)", x, x);
-    }
-    else
-    {
-      Display_print2(dispHandle, 0xff, 0, "pos   %d (0x%08x)", x, x);
-    }
-  }
-#endif
+  Display_print5(dispHandle, 0xff, 0, "recordings  : %08x %08x %08x %08x %08x",
+                 ctx.recordings[0], ctx.recordings[1], ctx.recordings[2],
+                 ctx.recordings[3], ctx.recordings[4]);
+  Display_print5(dispHandle, 0xff, 0, "              %08x %08x %08x %08x %08x",
+                 ctx.recordings[5], ctx.recordings[6], ctx.recordings[7],
+                 ctx.recordings[8], ctx.recordings[9]);
+  Display_print5(dispHandle, 0xff, 0, "              %08x %08x %08x %08x %08x",
+                 ctx.recordings[10], ctx.recordings[11], ctx.recordings[12],
+                 ctx.recordings[13], ctx.recordings[14]);
+  Display_print5(dispHandle, 0xff, 0, "              %08x %08x %08x %08x %08x",
+                 ctx.recordings[15], ctx.recordings[16], ctx.recordings[17],
+                 ctx.recordings[18], ctx.recordings[19]);
+  Display_print1(dispHandle, 0xff, 0, "              %08x", ctx.recordings[20]);
+  Display_print1(dispHandle, 0xff, 0, "restart     : %08x", ctx.recStart);
+  Display_print1(dispHandle, 0xff, 0, "recPos      : %08x", ctx.recPos);
 
   Event_post(audioEvent, AUDIO_START_REC);
 
@@ -567,13 +561,13 @@ static void Audio_taskFxn(UArg a0, UArg a1)
                                 BIOS_WAIT_FOREVER);
     if (event & AUDIO_START_REC)
     {
-      Display_print0(dispHandle, 0xff, 0, "event: AUDIO_START_REC");
+      Display_print0(dispHandle, 0xff, 0, "event       : AUDIO_START_REC");
       startRecording();
     }
 
     if (event & AUDIO_STOP_REC)
     {
-      Display_print0(dispHandle, 0xff, 0, "event: AUDIO_STOP_REC");
+      Display_print0(dispHandle, 0xff, 0, "event       : AUDIO_STOP_REC");
       stopRecording();
     }
 
@@ -638,7 +632,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
               Display_print5(
                   dispHandle, 0xff, 0,
-                  "nvs write, pos %06d, cnt %06d, cntInSect %02d, offset %08d (rem4k %04d), size 256",
+                  " - nvs write, pos 0x%08x, cnt %06d, cntInSect %02d, offset 0x%08x (%%4k %04d), size 256",
                   ctx.recPos,
                   ctx.recAdpcmCount,
                   ctx.recAdpcmCountInSect, offset, offset % 4096);
@@ -654,7 +648,7 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 
               Display_print5(
                   dispHandle, 0xff, 0,
-                  "nvs write, pos %06d, cnt %06d, cntInSect %02d, offset %08d (rem4k %04d), size 160",
+                  " - nvs write, pos 0x%08x, cnt %06d, cntInSect %02d, offset 0x%08x (%%4k %04d), size 160",
                   ctx.recPos,
                   ctx.recAdpcmCount,
                   ctx.recAdpcmCountInSect, offset, offset % 4096);
@@ -680,17 +674,23 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 //                           ctx.currPos, ctx.currPos, MONOTONIC_COUNTER,
 //                           MONOTONIC_COUNTER);
 
-            Display_print2(dispHandle, 0xff, 0, "start %d (0x%08x)", ctx.recStart, ctx.recStart);
-            Display_print2(dispHandle, 0xff, 0, "pos   %d (0x%08x)", ctx.recPos, ctx.recPos);
-            Display_print2(dispHandle, 0xff, 0, "count %d (0x%08x)", MONOTONIC_COUNTER, MONOTONIC_COUNTER);
+            Display_print2(
+                dispHandle, 0xff, 0,
+                "new sector  : pos 0x%08x, counter 0x%08x",
+                ctx.recPos, MONOTONIC_COUNTER);
+
+
+//            Display_print2(dispHandle, 0xff, 0, "start %d ()", ctx.recStart, ctx.recStart);
+//            Display_print2(dispHandle, 0xff, 0, "pos   %d (0x%08x)", ctx.recPos, ctx.recPos);
+//            Display_print2(dispHandle, 0xff, 0, "count %d (0x%08x)", MONOTONIC_COUNTER, MONOTONIC_COUNTER);
 
             /* it is important to do this here */
             size_t offset = (ctx.recPos % DATA_SECT_COUNT) * SECT_SIZE;
             NVS_erase(nvsHandle, offset, SECT_SIZE);
 
-            Display_print3(dispHandle, 0xff, 0,
-                           "nvs erase, offset %08d (0x%08x) (rem4k %d)", offset,
-                           offset, offset % 4096);
+            Display_print2(dispHandle, 0xff, 0,
+                           " - nvs erase,     0x%08x (%%4k %d)", offset,
+                           offset % 4096);
 
             if (ctx.recPos - ctx.recStart == MAX_RECORDING_SECTORS)
             {
@@ -698,14 +698,14 @@ static void Audio_taskFxn(UArg a0, UArg a1)
                   dispHandle,
                   0xff,
                   0,
-                  "max rec sect reached, before stopRecording(). start %d, pos %d",
+                  "max rec sect reached, before stopRecording(). start 0x%08x, pos 0x%08x",
                   ctx.recStart, ctx.recPos);
               stopRecording();
               Display_print2(
                   dispHandle,
                   0xff,
                   0,
-                  "max rec sect reached, after  stopRecording(). start %d, pos %d",
+                  "                      after  stopRecording(). start 0x%08x, pos 0x%08x",
                   ctx.recStart, ctx.recPos);
 
               Event_post(audioEvent, AUDIO_REC_AUTOSTOP);
