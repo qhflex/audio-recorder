@@ -2,32 +2,43 @@
 
 <br/>
 
+**版本**
+
+| date       | author                     | comment       |
+| ---------- | -------------------------- | ------------- |
+| 2022-08-09 | matianfu@gingerologist.com | initial draft |
+| 2022-08-17 | matianfu@gingerologist.com | first release |
+
+
+
 ## 1 nRF Connect
 
-nRF Connect是Nordic公司开发的一款BLE App，在Google官方的Google Play可以下载到。TI的官方开发测试文档都未提及该应用，而是推荐另一个第三方软件LightBlue用于调试BLE程序。
+nRF Connect是Nordic公司开发的一款BLE App，在Google官方的Google Play可以下载到。
 
-LightBlue操作简单，界面设计比nRF Connect更直觉友好，但对于录音项目，LightBlue无法支持协商MTU，所以无法使用。除协商MTU之外，nRF Connect还支持选择PHY，还可以LOG全部传输数据，这些调试所需的必要特性。
+TI的官方开发测试文档通常推荐LightBlue用于调试BLE程序。LightBlue操作简单，界面设计比nRF Connect友好；但对于录音项目，LightBlue无法支持协商MTU，所以无法使用。除协商MTU之外，nRF Connect还支持强制选择PHY rate，Log全部传输数据等等，给固件和应用开发提供更好支持。
 
-本文档叙述使用nRF Connect调试的方法和注意事项。
+<br/>
 
-阅读本文档需要使用者阅读接口定义文档，否则无法理解BLE和串口输出的内容含义。
+本文档描述使用nRF Connect调试测试固件的方法和注意事项。阅读本文档需要使用者阅读接口定义文档，否则无法理解BLE和串口输出的内容含义。
 
 <br/>
 
 ## 2 打印输出
 
-当前固件在源代码一级支持配置3种打印输出方式，其中两种用于打印ADPCM语音数据，检查录音路径（write path）和读取录音数据路径（read path）上的数据正确性。这两种方式主要是固件开发者自己Debug使用。
-
-第三种打印方式开放给所有参与开发测试的人员使用。该打印可以输出：
-
-1. 所有write path上的写入flash的地址，包括sector，sector内的偏移量，写入数据的大小；
-2. 所有read path上从flash读取数据的地址，包括sector，sector内的偏移量，读取数据的大小；
-3. 蓝牙notification状态变化；
-5. 打印从BLE输出的`Status`数据包内容，这样调试人员不用在nRF Connect上自己解析这个数据包；App开发者可以对比自己程序解析的结果和打印结果是否一致；
+当前固件在源代码一级支持配置3种打印输出方式，其中两种用于打印ADPCM语音数据，检查录音和读取录音数据时的数据正确性。这两种方式主要给固件开发者自己使用。
 
 <br/>
 
-出于功耗考虑，最终发布的产品版本不会使用打印输出。但配合nRF Connect调试时，使用有打印输出的固件会更方便。
+第三种打印方式开放给所有参与开发测试的人员使用。该打印可以输出：
+
+1. 录音时所有写入flash的地址，包括sector，sector内的偏移量，写入数据的大小；
+2. 读取录音时所有从flash读取数据的地址，包括sector，sector内的偏移量，读取数据的大小；
+3. 蓝牙notification状态变化（`subscription on / off`）；
+5. 打印从BLE输出的`Status`数据包内容；调试人员不用在nRF Connect上自己手工解析该数据包；App开发者可以对比程序解析结果和打印结果是否一致；
+
+<br/>
+
+考虑低功耗需求，最终发布的产品版本不会使用打印输出。但配合nRF Connect调试时，使用有打印输出的固件更方便。
 
 <br/>
 
@@ -39,7 +50,7 @@ LightBlue操作简单，界面设计比nRF Connect更直觉友好，但对于录
 
 <br/>
 
-串口输出Log使用的baud rate是1.5Mbps（1,500,000），在Linux上minicom支持该baud rate，使用Windows平台的开发者要自己找到合适的串口工具使用，文本打印量很大，需要串口工具能开很大的缓冲区接收信息。
+串口输出Log使用的波特率是1.5Mbps（`1,500,000`），在Linux上`minicom`支持该波特率，使用Windows平台的开发者要自己找到合适的串口工具使用。
 
 <br/>
 

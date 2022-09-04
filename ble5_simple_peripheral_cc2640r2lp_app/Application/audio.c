@@ -301,7 +301,7 @@ IncomingMsg_t inmsg[2];
 static Semaphore_Handle semOutgoingMsgFreed;
 static List_List freeOutgoingMsgs;
 
-static Semaphore_Handle semIncomingMsgPending;
+// static Semaphore_Handle semIncomingMsgPending;
 static List_List pendingIncomingMsgs;
 static List_List freeIncomingMsgs;
 
@@ -461,10 +461,10 @@ static void Audio_init(void)
 //  mboxParams.readerEventId = AUDIO_INCOMING_MSG;
 //  incomingMailbox = Mailbox_create(sizeof(uint32_t), 4, &mboxParams, Error_IGNORE);
 
-  Semaphore_Params_init(&semParams);
-  semParams.event = audioEvent;
-  semParams.eventId = AUDIO_INCOMING_MSG;
-  semIncomingMsgPending = Semaphore_create(0, &semParams, Error_IGNORE);
+//  Semaphore_Params_init(&semParams);
+//  semParams.event = audioEvent;
+//  semParams.eventId = AUDIO_INCOMING_MSG;
+//  semIncomingMsgPending = Semaphore_create(0, &semParams, Error_IGNORE);
 
   Semaphore_Params_init(&semParams);
   semParams.event = audioEvent;
@@ -735,10 +735,10 @@ static void Audio_taskFxn(UArg a0, UArg a1)
       }
     }
 
-    if (event & AUDIO_INCOMING_MSG)
-    {
-      Semaphore_pend(semIncomingMsgPending, 0);
-    }
+//    if (event & AUDIO_INCOMING_MSG)
+//    {
+//      Semaphore_pend(semIncomingMsgPending, 0);
+//    }
 
     if (event & AUDIO_OUTGOING_MSG)
     {

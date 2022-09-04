@@ -59,8 +59,6 @@ ADPCM使用的近似值表有多种标准；固件选择的标准是IMA ADPCM，
 
 <br/>
 
-
-
 ## 4 存储
 
 设备内部包含SPI NOR Flash，最小擦写单元是Sector（4096 Bytes），固件也使用Sector作为读取时的最小寻址单位。
