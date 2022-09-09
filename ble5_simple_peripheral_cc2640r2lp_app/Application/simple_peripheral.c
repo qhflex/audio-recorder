@@ -85,6 +85,7 @@
 
 #include <board.h>
 
+#include "button.h"
 #include "audio.h"
 #include "simple_gatt_profile.h"
 #include "simple_peripheral.h"
@@ -422,6 +423,8 @@ static void SimplePeripheral_init(void)
  */
 static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 {
+  Semaphore_pend(bootSem, BIOS_WAIT_FOREVER);
+
   // Initialize application
   SimplePeripheral_init();
 

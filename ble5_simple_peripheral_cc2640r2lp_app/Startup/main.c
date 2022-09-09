@@ -50,16 +50,22 @@
 
 #include <xdc/runtime/Error.h>
 
+#include <ti/sysbios/BIOS.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/drivers/Power.h>
 #include <ti/drivers/power/PowerCC26XX.h>
-#include <ti/sysbios/BIOS.h>
+#include <ti/drivers/GPIO.h>
+
+#include <ti/devices/DeviceFamily.h>
+#include DeviceFamily_constructPath(inc/hw_prcm.h)
+#include DeviceFamily_constructPath(driverlib/sys_ctrl.h)
 
 #include <icall.h>
 #include "hal_assert.h"
 #include "bcomdef.h"
 #include "simple_peripheral.h"
 #include "audio.h"
+#include "button.h"
 
 /* Header files required to enable instruction fetch cache */
 #include <inc/hw_memmap.h>
@@ -96,6 +102,7 @@ extern Display_Handle dispHandle;
 /*******************************************************************************
  * GLOBAL VARIABLES
  */
+bool isWakingFromShutdown;
 
 /*******************************************************************************
  * EXTERNS
@@ -123,7 +130,27 @@ int main()
   /* Register Application callback to trap asserts raised in the Stack */
   RegisterAssertCback(AssertHandler);
 
+  uint32_t rSrc = SysCtrlResetSourceGet();
+
   Board_initGeneral();
+
+  /* Do pin init before starting BIOS */
+  /* If coming from shutdown, use special gpio table.*/
+  if (rSrc == RSTSRC_WAKEUP_FROM_SHUTDOWN) {
+      /* The shutdown table has LED1 on to ensure no glitch on the
+       * output.
+       */
+      isWakingFromShutdown = true;
+      /* Open LED pins with shutdown table (LED1 on, LED0 off).
+       * A separate PIN_config table is used to keep LED1 on.
+       */
+      // hPins = PIN_open(&LedPinState, LedPinTableSd);
+  } else {
+      /* When not waking from shutdown, use default init table. */
+      isWakingFromShutdown = false;
+      /* Open LED pins (LED1 off, LED0 on)*/
+      // hPins = PIN_open(&LedPinState, LedPinTable);
+  }
 
   // Enable iCache prefetching
   VIMSConfigure(VIMS_BASE, TRUE, TRUE);
@@ -147,9 +174,16 @@ int main()
   /* Start tasks of external images - Priority 5 */
   ICall_createRemoteTasks();
 
+  bootSem = Semaphore_create(0, NULL, Error_IGNORE);
+
   Audio_createTask();
 
   SimplePeripheral_createTask();
+
+  Button_createTask();
+
+  GPIO_init();
+  GPIO_setConfig(Board_GPIO_BTN1, GPIO_CFG_IN_PU);
 
   /* enable interrupts and start SYS/BIOS */
   BIOS_start();

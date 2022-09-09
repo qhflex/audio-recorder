@@ -42,8 +42,10 @@
 
 #include "simple_gatt_profile.h"
 #include "simple_peripheral.h"
+#include "button.h"
 
 #include "audio.h"
+
 
 
 /*********************************************************************
@@ -136,7 +138,7 @@
 
 #define SECT_OFFSET(index)                (index * SECT_SIZE)
 
-#define MAX_RECORDING_SECTORS             20
+#define MAX_RECORDING_SECTORS             (uint32_t)(-1)
 
 /*
  * monotonic counter is used to record sectors used.
@@ -386,7 +388,7 @@ static char adpcmEncoder(short sample, int16_t *prevSample, uint8_t *prevIndex);
 static short adpcmDecoder(char code, int16_t* prevSample, uint8_t *prevIndex);
 void checksum(void *p, uint32_t len, uint8_t *a, uint8_t *b);
 
-extern void simple_peripheral_spin(void);
+// extern void simple_peripheral_spin(void);
 
 static int countMarkedBits(int sectIndex, size_t size);
 static void incrementMarkedBits(int sectIndex, size_t current);
@@ -524,6 +526,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 //  Types_FreqHz freq;
 //  Timestamp_getFreq(&freq);
 
+  Semaphore_pend(bootSem, BIOS_WAIT_FOREVER);
+
 #ifndef Display_DISABLE_ALL
   Display_init();
   Display_Params dispParams;
@@ -559,6 +563,15 @@ static void Audio_taskFxn(UArg a0, UArg a1)
   {
     uint32_t event = Event_pend(audioEvent, NULL, AUDIO_EVENTS,
                                 BIOS_WAIT_FOREVER);
+    if (event & BTN_SHUTDOWN_EVT)
+    {
+      Display_print0(dispHandle, 0xff, 0, "event       : BTN_SHUTDOWN");
+      for (int i = 0;; i++)
+      {
+        Task_sleep(1000 * 1000 / Clock_tickPeriod);
+      }
+    }
+
     if (event & AUDIO_START_REC)
     {
       Display_print0(dispHandle, 0xff, 0, "event       : AUDIO_START_REC");
