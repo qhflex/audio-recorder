@@ -20,6 +20,7 @@
 #include <ti/display/Display.h>
 
 #include "board.h"
+#include "audio.h"
 #include "button.h"
 
 #define BUTTON_TASK_PRIORITY                1
@@ -126,7 +127,16 @@ extern bool subscriptionOn;
 /*********************************************************************
  * LOCAL VARIABLES
  */
-static int btn[5] = {0, 0, 0, 1, 0};
+static int btn[6] = {0, 0, 0, 0, 1, 0};
+
+#define LONG_PRESS      (                                 btn[4] ==  200)
+#define SINGLE_CLICK    (                btn[2] < -30  && \
+                           8 < btn[3] && btn[3] <  30  && btn[4] == -1  )
+
+#define DOUBLE_CLICK    ((0 == btn[0] || btn[0] < -30) && \
+                           8 < btn[1] && btn[1] <  30  && \
+                         -30 < btn[2] && btn[2] < -8   && \
+                           8 < btn[3] && btn[3] <  30  && btn[4] == -1  )
 
 /*********************************************************************
  * LOCAL FUNCTIONS
@@ -184,24 +194,25 @@ static void Button_read(void)
 
   if (s == 0)
   {
-    if (btn[3] > 0)
+    if (btn[4] > 0)
     {
-      btn[3]++;
+      btn[4]++;
     }
     else
     {
-      btn[3]--;
+      btn[4]--;
     }
   }
-  else if (s * btn[3] > 0)
+  else if (s * btn[4] > 0)
   {
-    btn[3] += s;
+    btn[4] += s;
   }
   else {
     btn[0] = btn[1];
     btn[1] = btn[2];
     btn[2] = btn[3];
-    btn[3] = s;
+    btn[3] = btn[4];
+    btn[4] = s;
   }
 }
 
@@ -213,6 +224,7 @@ static void Button_enablePeriph(void)
   GPIO_setConfig(Board_GPIO_FLASH_RESET, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
   GPIO_setConfig(Board_GPIO_FLASH_WP, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
 
+  // TODO could this be shorter?
   for (int i = 0; i < 20; i++) {
     Button_read();
     Task_sleep(10 * 1000 / Clock_tickPeriod);
@@ -237,12 +249,6 @@ static void Button_taskFxn(UArg a0, UArg a1)
     Button_shutdown();
   }
 
-#define LONG_PRESS      (200 == btn[3])
-#define SINGLE_CLICK    (  8 < btn[2] && btn[2] < 20 && btn[3] == -1)
-#define DOUBLE_CLICK    (  8 < btn[0] && btn[0] < 30 && \
-                         -30 < btn[1] && btn[1] < -8 && \
-                           8 < btn[2] && btn[2] < 30 && btn[3] == -1)
-
   // initial state loop
   for (;;)
   {
@@ -250,6 +256,9 @@ static void Button_taskFxn(UArg a0, UArg a1)
 
     if (LONG_PRESS)
     {
+      Display_print5(dispHandle, 0xff, 0, "(0) long press  : %d %d %d %d %d",
+                     btn[0], btn[1], btn[2], btn[3], btn[4]);
+
       Button_enablePeriph();
       recordingState = false;
       Semaphore_post(launchAudioSem);
@@ -259,7 +268,8 @@ static void Button_taskFxn(UArg a0, UArg a1)
 
     if (DOUBLE_CLICK)
     {
-      Display_print4(dispHandle, 0xff, 0, "double click: %d %d %d %d", btn[0], btn[1], btn[2], btn[3]);
+      Display_print5(dispHandle, 0xff, 0, "(0) double click: %d %d %d %d %d",
+                     btn[0], btn[1], btn[2], btn[3], btn[4]);
 
       if (t == 0)
       {
@@ -273,34 +283,40 @@ static void Button_taskFxn(UArg a0, UArg a1)
       goto recording;
     }
 
-    int *head = btn[2] == 0 ? &btn[3] : btn[1] == 0 ? &btn[2] :
-                btn[0] == 0 ? &btn[1] : &btn[0];
+    int *head = btn[3] == 0 ? &btn[4] : btn[2] == 0 ? &btn[3] :
+                btn[1] == 0 ? &btn[2] : btn[0] == 0 ? &btn[1] : &btn[0];
 
-#define HL      (0 < head[0] && head[0] < 200)
-#define H0      (0 < head[0] && head[0] < 30)
-#define H0A     (8 < head[0] && head[0] < 30)
-#define N1      (head[1] == 0)
-#define H1      (-30 < head[1] && head[1] < 0)
-#define H1A     (-30 < head[1] && head[1] < -8)
-#define N2      (head[2] == 0)
-#define H2      (0 < head[2] && head[2] < 30)
-#define H2A     (8 < head[2] && head[2] < 30)
-#define N3      (head[3] == 0)
+#define HL      (  0 < head[0] && head[0] <  200)
+#define H0A     (  0 < head[0] && head[0] <  30 )
+#define H0      (  8 < head[0] && head[0] <  30 )
+#define Z1      (                 head[1] == 0  )
+#define H1A     (-30 < head[1] && head[1] <  0  )
+#define H1      (-30 < head[1] && head[1] < -8  )
+#define Z2      (                 head[2] == 0  )
+#define H2A     (  0 < head[2] && head[2] <  30 )
+#define H2      (  8 < head[2] && head[2] <  30 )
+#define Z3      (                 head[3] == 0  )
 
-    bool longPressWip = HL && N1;
-    bool doubleClickWip = (H0 && N1) || (H0A && H1 && N2) || (H0A && H1A && H2 && N3);
+    bool longPressWip = HL && Z1;
+    bool doubleClickWip = (H0A && Z1) || (H0 && H1A && Z2) || (H0 && H1 && H2A && Z3);
     bool wip = longPressWip || doubleClickWip;
 
 #undef HL
+#undef H0A
 #undef H0
-#undef N1
+#undef Z1
+#undef H1A
 #undef H1
-#undef N2
+#undef Z2
+#undef H2A
 #undef H2
-#undef N3
+#undef Z3
 
     if (t && !wip)
     {
+      Display_print5(dispHandle, 0xff, 0, "(0) invalid wake: %d %d %d %d %d",
+                     btn[0], btn[1], btn[2], btn[3], btn[4]);
+
       Button_shutdown();
     }
 
@@ -313,30 +329,52 @@ recording:
   {
     Button_read();
 
-    if (DOUBLE_CLICK || recordingState == false)
+    if (recordingState == false)
     {
+      Display_print0(dispHandle, 0xff, 0, "(1) recording finished.");
+      Button_shutdown();
+    }
+
+    if (DOUBLE_CLICK)
+    {
+      Display_print5(dispHandle, 0xff, 0, "(1) double click: %d %d %d %d %d",
+                     btn[0], btn[1], btn[2], btn[3], btn[4]);
+      Audio_stopRec();
       Button_shutdown();
     }
 
     if (LONG_PRESS)
     {
-      // TODO stop recording
+      Display_print5(dispHandle, 0xff, 0, "(1) long press  : %d %d %d %d %d",
+                     btn[0], btn[1], btn[2], btn[3], btn[4]);
+
+      Audio_stopRec();
       Semaphore_post(launchBleSem);
       goto idle;
     }
+
+    Task_sleep(10 * 1000 / Clock_tickPeriod);
   }
 
 idle:
 
   for (;;)
   {
-    Button_read();
     timeout = subscriptionOn ? 0 : (timeout + 1);
-
-    if (timeout > 180 * 100 || SINGLE_CLICK)
-    {
+    if (timeout > 180 * 100) {
+      Display_print0(dispHandle, 0xff, 0, "(2) ble idle timeout.");
       Button_shutdown();
-      break;  // to preserve code after loop
+    }
+
+    Button_read();
+
+
+    if (SINGLE_CLICK)
+    {
+      Display_print5(dispHandle, 0xff, 0, "(2) single click: %d %d %d %d %d",
+                     btn[0], btn[1], btn[2], btn[3], btn[4]);
+      Button_shutdown();
+      break;  // to preserve code after loop TODO
     }
 
     Task_sleep(10 * 1000 / Clock_tickPeriod);
@@ -441,6 +479,10 @@ static void Button_shutdown(void)
   GPIO_write(Board_GPIO_GLED, 0);
   Task_sleep(100 * 1000 / Clock_tickPeriod);
 #endif
+
+  Display_print0(dispHandle, 0xff, 0, "shutdown in 400ms");
+
+  Task_sleep(400 * 1000 / Clock_tickPeriod);
 
   /* Configure DIO for wake up from shutdown */
   PINCC26XX_setWakeup(ButtonTableWakeUp);

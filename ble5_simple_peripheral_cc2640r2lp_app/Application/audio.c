@@ -588,9 +588,11 @@ static void Audio_taskFxn(UArg a0, UArg a1)
     if (event & UPDATE_DUR_05 || event & UPDATE_DUR_10 || event & UPDATE_DUR_15)
     {
       uint8_t dur = (event & UPDATE_DUR_15) ? 15 : (event & UPDATE_DUR_10) ? 10 : 5;
+
+      Display_print1(dispHandle, 0xff, 0, "set duration: %d", dur);
+
       NVS_erase(nvsHandle, DUR_SECT_OFFSET, SECT_SIZE);
       NVS_write(nvsHandle, DUR_SECT_OFFSET, &dur, 1, NVS_WRITE_POST_VERIFY);
-
     }
 
     if (event & AUDIO_START_REC)
@@ -1552,7 +1554,7 @@ void Audio_updateDuration(uint8_t dur)
   }
 }
 
-void Audio_stopRecording(void)
+void Audio_stopRec(void)
 {
   Event_post(audioEvent, AUDIO_STOP_REC);
 }
