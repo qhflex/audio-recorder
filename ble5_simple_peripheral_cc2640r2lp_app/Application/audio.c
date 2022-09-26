@@ -99,7 +99,7 @@
 #define PREAMBLE                          ((uint64_t)0x7FFF80017FFF8001)
 
 // Task configuration
-#define MC_TASK_PRIORITY                  1
+#define MC_TASK_PRIORITY                  2
 
 #ifndef MC_TASK_STACK_SIZE
 #define MC_TASK_STACK_SIZE                1024
@@ -119,12 +119,17 @@
 #define AUDIO_BLE_SUBSCRIBE               Event_Id_08
 #define AUDIO_BLE_UNSUBSCRIBE             Event_Id_09
 
+#define UPDATE_DUR_05                     Event_Id_10
+#define UPDATE_DUR_10                     Event_Id_11
+#define UPDATE_DUR_15                     Event_Id_12
+
 #define AUDIO_REC_AUTOSTOP                Event_Id_31 // used for debugging
 
 #define AUDIO_EVENTS                                \
   (AUDIO_PCM_EVT | AUDIO_START_REC | AUDIO_STOP_REC | AUDIO_READ_EVT | \
    UART_TX_RDY_EVT | UART_RX_RDY_EVT | AUDIO_INCOMING_MSG | AUDIO_OUTGOING_MSG | \
-   AUDIO_REC_AUTOSTOP | AUDIO_BLE_SUBSCRIBE | AUDIO_BLE_UNSUBSCRIBE )
+   AUDIO_REC_AUTOSTOP | AUDIO_BLE_SUBSCRIBE | AUDIO_BLE_UNSUBSCRIBE | \
+   UPDATE_DUR_05 | UPDATE_DUR_10 | UPDATE_DUR_15 )
 
 #define FLASH_SIZE                        nvsAttrs.regionSize
 #define SECT_SIZE                         nvsAttrs.sectorSize
@@ -134,11 +139,16 @@
 #define MAGIC_OFFSET                      (HISECT_OFFSET + 2048)
 #define LOSECT_INDEX                      (SECT_COUNT - 2)
 #define LOSECT_OFFSET                     (LOSECT_INDEX * SECT_SIZE)
+
+#define DUR_SECT_INDEX                    (SECT_COUNT - 3)  // store single byte duration
+#define DUR_SECT_OFFSET                   (DUR_SECT_INDEX * SECT_SIZE)
+
 #define DATA_SECT_COUNT                   (SECT_COUNT - 16)
 
 #define SECT_OFFSET(index)                (index * SECT_SIZE)
 
-#define MAX_RECORDING_SECTORS             (uint32_t)(-1)
+// #define MAX_RECORDING_SECTORS             (uint32_t)(-1)
+#define MAX_RECORDING_SECTORS             ((uint32_t)(simpleProfileChar2) * 60 * 2)
 
 /*
  * monotonic counter is used to record sectors used.
@@ -152,7 +162,7 @@
 #define ADPCMBUF_NUM                      4
 #define PCMBUF_SIZE                       (ADPCMBUF_SIZE * 4)
 #define PCM_SAMPLES_PER_BUF               (PCMBUF_SIZE / sizeof(int16_t))
-#define PCMBUF_NUM                        4
+#define PCMBUF_NUM                        6
 #define PCMBUF_TOTAL_SIZE                 (PCMBUF_SIZE * PCMBUF_NUM)
 
 #define ADPCM_SIZE_PER_SECT               4000
@@ -292,7 +302,7 @@ Task_Struct mcTask;
 uint8_t mcTaskStack[MC_TASK_STACK_SIZE];
 
 #ifndef Display_DISABLE_ALL
-Display_Handle    dispHandle;
+extern Display_Handle    dispHandle;
 #endif
 
 Event_Handle audioEvent;
@@ -307,6 +317,7 @@ static List_List freeOutgoingMsgs;
 static List_List pendingIncomingMsgs;
 static List_List freeIncomingMsgs;
 
+extern uint8_t simpleProfileChar2;
 
 /*********************************************************************
  * LOCAL VARIABLES
@@ -526,14 +537,9 @@ static void Audio_taskFxn(UArg a0, UArg a1)
 //  Types_FreqHz freq;
 //  Timestamp_getFreq(&freq);
 
-  Semaphore_pend(bootSem, BIOS_WAIT_FOREVER);
+  Semaphore_pend(launchAudioSem, BIOS_WAIT_FOREVER);
 
-#ifndef Display_DISABLE_ALL
-  Display_init();
-  Display_Params dispParams;
-  Display_Params_init(&dispParams);
-  dispHandle = Display_open(Display_Type_ANY, &dispParams);
-#endif
+
 
   Audio_init();
 
@@ -557,12 +563,19 @@ static void Audio_taskFxn(UArg a0, UArg a1)
   Display_print1(dispHandle, 0xff, 0, "restart     : %08x", ctx.recStart);
   Display_print1(dispHandle, 0xff, 0, "recPos      : %08x", ctx.recPos);
 
-  Event_post(audioEvent, AUDIO_START_REC);
+  if (recordingState)
+  {
+    Event_post(audioEvent, AUDIO_START_REC);
+  }
 
   for (int loop = 0;; loop++)
   {
+    // Display_print0(dispHandle, 0xff, 0, "before event");
     uint32_t event = Event_pend(audioEvent, NULL, AUDIO_EVENTS,
                                 BIOS_WAIT_FOREVER);
+    // Display_print0(dispHandle, 0xff, 0, "after event");
+
+
     if (event & BTN_SHUTDOWN_EVT)
     {
       Display_print0(dispHandle, 0xff, 0, "event       : BTN_SHUTDOWN");
@@ -570,6 +583,14 @@ static void Audio_taskFxn(UArg a0, UArg a1)
       {
         Task_sleep(1000 * 1000 / Clock_tickPeriod);
       }
+    }
+
+    if (event & UPDATE_DUR_05 || event & UPDATE_DUR_10 || event & UPDATE_DUR_15)
+    {
+      uint8_t dur = (event & UPDATE_DUR_15) ? 15 : (event & UPDATE_DUR_10) ? 10 : 5;
+      NVS_erase(nvsHandle, DUR_SECT_OFFSET, SECT_SIZE);
+      NVS_write(nvsHandle, DUR_SECT_OFFSET, &dur, 1, NVS_WRITE_POST_VERIFY);
+
     }
 
     if (event & AUDIO_START_REC)
@@ -705,7 +726,8 @@ static void Audio_taskFxn(UArg a0, UArg a1)
                            " - nvs erase,     0x%08x (%%4k %d)", offset,
                            offset % 4096);
 
-            if (ctx.recPos - ctx.recStart == MAX_RECORDING_SECTORS)
+            // great than won't happen in current behavioral definition
+            if (ctx.recPos - ctx.recStart >= MAX_RECORDING_SECTORS)
             {
               Display_print2(
                   dispHandle,
@@ -1043,6 +1065,8 @@ static void startRecording(void)
 
 static void stopRecording(void)
 {
+  recordingState = false;
+
   if (!ctx.recording)
     return;
 
@@ -1349,6 +1373,23 @@ static void loadCounter(void)
   static bool initialized = false;
   if (!initialized)
   {
+    uint8_t dur;
+    NVS_read(nvsHandle, DUR_SECT_OFFSET, &dur, 1);
+    Display_print1(dispHandle, 0xff, 0, "duration    : %d", dur);
+
+    if (dur == 10)
+    {
+      simpleProfileChar2 = 10;
+    }
+    else if (dur == 15)
+    {
+      simpleProfileChar2 = 15;
+    }
+    else
+    {
+      simpleProfileChar2 = 5;
+    }
+
     if (MAGIC != readMagic())
     {
       resetCounter();
@@ -1493,5 +1534,26 @@ void recvIncomingMsg(IncomingMsg_t* msg)
 IncomingMsg_t* allocIncomingMsg(void)
 {
   return (IncomingMsg_t*)List_get(&freeIncomingMsgs);
+}
+
+void Audio_updateDuration(uint8_t dur)
+{
+  if (dur == 5)
+  {
+    Event_post(audioEvent, UPDATE_DUR_05);
+  }
+  else if (dur == 10)
+  {
+    Event_post(audioEvent, UPDATE_DUR_10);
+  }
+  else if (dur == 15)
+  {
+    Event_post(audioEvent, UPDATE_DUR_15);
+  }
+}
+
+void Audio_stopRecording(void)
+{
+  Event_post(audioEvent, AUDIO_STOP_REC);
 }
 

@@ -25,6 +25,13 @@
  */
 void Button_createTask(void);
 
-extern Semaphore_Handle bootSem;
+extern Semaphore_Handle launchAudioSem;
+extern Semaphore_Handle launchBleSem;
+
+/*
+ * audio.c has its own recording state in ctx. this one is used for synchronization
+ * between button.c and audio.c
+ */
+extern bool recordingState;
 
 #endif /* APPLICATION_BUTTON_H_ */

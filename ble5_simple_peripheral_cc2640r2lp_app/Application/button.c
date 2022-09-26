@@ -17,11 +17,13 @@
 #include <ti/drivers/pin/PINCC26XX.h>
 #include <ti/drivers/GPIO.h>
 
+#include <ti/display/Display.h>
+
 #include "board.h"
 #include "button.h"
 
 #define BUTTON_TASK_PRIORITY                1
-#define BUTTON_TASK_STACK_SIZE              256
+#define BUTTON_TASK_STACK_SIZE              384
 
 /*********************************************************************
  * How to integrate this file (and header)
@@ -44,8 +46,11 @@ Task_Struct buttonTask;
 #endif
 uint8_t buttonTaskStack[BUTTON_TASK_STACK_SIZE];
 
-Semaphore_Handle bootSem;
-bool shuttingDown;
+Semaphore_Handle launchAudioSem;
+Semaphore_Handle launchBleSem;
+
+bool recordingState = false;
+bool shuttingDown = false;
 
 /* Wake-up Button pin table */
 //PIN_Config ButtonTableWakeUp[] = {
@@ -108,7 +113,20 @@ const PIN_Config ButtonTableWakeUp[] = {
 extern bool isWakingFromShutdown;
 extern void simple_peripheral_spin(void);
 
+extern Display_Handle dispHandle;
+
 extern Event_Handle audioEvent;
+
+extern bool subscriptionOn;
+
+/*********************************************************************
+ * EXTERNAL FUNCTIONS
+ */
+
+/*********************************************************************
+ * LOCAL VARIABLES
+ */
+static int btn[5] = {0, 0, 0, 1, 0};
 
 /*********************************************************************
  * LOCAL FUNCTIONS
@@ -117,6 +135,9 @@ static void Button_taskFxn(UArg a0, UArg a1);
 static bool Button_pollingPowerOn(void);
 static void Button_pollingPowerOff(void);
 static void Button_shutdown(void);
+
+static void Button_read(void);
+static void Button_enablePeriph(void);
 
 /*********************************************************************
  * @fn      Button_createTask
@@ -136,6 +157,68 @@ void Button_createTask(void)
   Task_construct(&buttonTask, Button_taskFxn, &taskParams, NULL);
 }
 
+/*************
+ * @fn      Button_read
+ *
+ * @brief   return 1 if button pressed, -1 if button released, 0 if uncertain.
+ */
+static void Button_read(void)
+{
+  static uint32_t samples = 0x0000000f;
+  int s = 0;
+
+  samples = (samples << 1) & 0x0000000f;
+  if (!GPIO_read(Board_GPIO_BTN1))
+  {
+    samples |= 0x00000001;
+  }
+
+  if (samples == 0x0f)
+  {
+    s = 1;
+  }
+  else if (samples == 0x00)
+  {
+    s= -1;
+  }
+
+  if (s == 0)
+  {
+    if (btn[3] > 0)
+    {
+      btn[3]++;
+    }
+    else
+    {
+      btn[3]--;
+    }
+  }
+  else if (s * btn[3] > 0)
+  {
+    btn[3] += s;
+  }
+  else {
+    btn[0] = btn[1];
+    btn[1] = btn[2];
+    btn[2] = btn[3];
+    btn[3] = s;
+  }
+}
+
+static void Button_enablePeriph(void)
+{
+  GPIO_setConfig(Board_GPIO_1V8_EN, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
+  GPIO_setConfig(Board_GPIO_I2S_SELECT, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
+  GPIO_setConfig(Board_GPIO_FLASH_CS, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
+  GPIO_setConfig(Board_GPIO_FLASH_RESET, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
+  GPIO_setConfig(Board_GPIO_FLASH_WP, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
+
+  for (int i = 0; i < 20; i++) {
+    Button_read();
+    Task_sleep(10 * 1000 / Clock_tickPeriod);
+  }
+}
+
 /*********************************************************************
  * @fn      Button_taskFxn
  *
@@ -145,12 +228,123 @@ void Button_createTask(void)
  */
 static void Button_taskFxn(UArg a0, UArg a1)
 {
-  volatile int t = 1; // used for debug
+  volatile int t = 1;       // used for debug
+  int timeout = 0;          // for idle state
 
+  // shutdown if not wake up from pin
   if (!isWakingFromShutdown)
   {
     Button_shutdown();
   }
+
+#define LONG_PRESS      (200 == btn[3])
+#define SINGLE_CLICK    (  8 < btn[2] && btn[2] < 20 && btn[3] == -1)
+#define DOUBLE_CLICK    (  8 < btn[0] && btn[0] < 30 && \
+                         -30 < btn[1] && btn[1] < -8 && \
+                           8 < btn[2] && btn[2] < 30 && btn[3] == -1)
+
+  // initial state loop
+  for (;;)
+  {
+    Button_read();
+
+    if (LONG_PRESS)
+    {
+      Button_enablePeriph();
+      recordingState = false;
+      Semaphore_post(launchAudioSem);
+      Semaphore_post(launchBleSem);
+      goto idle;
+    }
+
+    if (DOUBLE_CLICK)
+    {
+      Display_print4(dispHandle, 0xff, 0, "double click: %d %d %d %d", btn[0], btn[1], btn[2], btn[3]);
+
+      if (t == 0)
+      {
+        Task_sleep(10 * 1000 / Clock_tickPeriod);
+        continue;
+      }
+
+      Button_enablePeriph();
+      recordingState = true;
+      Semaphore_post(launchAudioSem);
+      goto recording;
+    }
+
+    int *head = btn[2] == 0 ? &btn[3] : btn[1] == 0 ? &btn[2] :
+                btn[0] == 0 ? &btn[1] : &btn[0];
+
+#define HL      (0 < head[0] && head[0] < 200)
+#define H0      (0 < head[0] && head[0] < 30)
+#define H0A     (8 < head[0] && head[0] < 30)
+#define N1      (head[1] == 0)
+#define H1      (-30 < head[1] && head[1] < 0)
+#define H1A     (-30 < head[1] && head[1] < -8)
+#define N2      (head[2] == 0)
+#define H2      (0 < head[2] && head[2] < 30)
+#define H2A     (8 < head[2] && head[2] < 30)
+#define N3      (head[3] == 0)
+
+    bool longPressWip = HL && N1;
+    bool doubleClickWip = (H0 && N1) || (H0A && H1 && N2) || (H0A && H1A && H2 && N3);
+    bool wip = longPressWip || doubleClickWip;
+
+#undef HL
+#undef H0
+#undef N1
+#undef H1
+#undef N2
+#undef H2
+#undef N3
+
+    if (t && !wip)
+    {
+      Button_shutdown();
+    }
+
+    Task_sleep(10 * 1000 / Clock_tickPeriod);
+  }
+
+recording:
+
+  for (;;)
+  {
+    Button_read();
+
+    if (DOUBLE_CLICK || recordingState == false)
+    {
+      Button_shutdown();
+    }
+
+    if (LONG_PRESS)
+    {
+      // TODO stop recording
+      Semaphore_post(launchBleSem);
+      goto idle;
+    }
+  }
+
+idle:
+
+  for (;;)
+  {
+    Button_read();
+    timeout = subscriptionOn ? 0 : (timeout + 1);
+
+    if (timeout > 180 * 100 || SINGLE_CLICK)
+    {
+      Button_shutdown();
+      break;  // to preserve code after loop
+    }
+
+    Task_sleep(10 * 1000 / Clock_tickPeriod);
+  }
+
+  /*
+   * The following code is not going to be executed
+   */
 
   // debouncing key hold/key release
   if (t & !Button_pollingPowerOn())
@@ -159,25 +353,12 @@ static void Button_taskFxn(UArg a0, UArg a1)
     Button_shutdown();
   }
 
-  GPIO_setConfig(Board_GPIO_1V8_EN, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
-  GPIO_setConfig(Board_GPIO_I2S_SELECT, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
-  GPIO_setConfig(Board_GPIO_FLASH_CS, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
-  GPIO_setConfig(Board_GPIO_FLASH_RESET, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
-  GPIO_setConfig(Board_GPIO_FLASH_WP, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_HIGH);
-
-  // waiting for external device power-on and stabilize
-  Task_sleep(200 * 1000 / Clock_tickPeriod);
-
-  // ble, audio
-  Semaphore_post(bootSem);
-  Semaphore_post(bootSem);
-
   Button_pollingPowerOff();
 
   shuttingDown = true;
   Event_post(audioEvent, BTN_SHUTDOWN_EVT);
 
-  Task_sleep(1000 * 1000 / Clock_tickPeriod);
+  Task_sleep(100 * 1000 / Clock_tickPeriod);
   Button_shutdown();
 }
 

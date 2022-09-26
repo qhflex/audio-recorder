@@ -19,9 +19,12 @@
 
 void Audio_createTask(void);
 
+
+
 void Audio_subscribe();
 void Audio_unsubscribe();
-
+void Audio_updateDuration(uint8_t dur);
+void Audio_stopRecording(void);
 
 #define IMT_NOOP                        (0)
 #define IMT_STOP_REC                    (1)

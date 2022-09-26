@@ -66,7 +66,7 @@
  * CONSTANTS
  */
 
-#define SERVAPP_NUM_ATTR_SUPPORTED        1 + 4   // TODO
+#define SERVAPP_NUM_ATTR_SUPPORTED        1 + 4 + 3   // TODO
 
 /*********************************************************************
  * TYPEDEFS
@@ -82,6 +82,9 @@ CONST uint8 simpleProfileServUUID[ATT_UUID_SIZE] = {
 // Characteristic 1 UUID: 0x9501
 CONST uint8 simpleProfileChar1UUID[ATT_UUID_SIZE] = {
     SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_CHAR1_UUID) };
+
+CONST uint8 simpleProfileChar2UUID[ATT_UUID_SIZE] = {
+    SIMPLEPROFILE_BASE_UUID_128(SIMPLEPROFILE_CHAR2_UUID) };
 
 /*********************************************************************
  * EXTERNAL VARIABLES
@@ -106,9 +109,11 @@ static CONST gattAttrType_t simpleProfileService = { ATT_UUID_SIZE,
 
 // Simple Profile Characteristic 4 Properties
 static uint8 simpleProfileChar1Props = GATT_PROP_WRITE | GATT_PROP_NOTIFY;
+static uint8 simpleProfileChar2Props = GATT_PROP_READ | GATT_PROP_WRITE;
 
 // Characteristic 4 Value
 static uint8 simpleProfileChar1 = 0;
+uint8_t simpleProfileChar2 = 5;
 
 // Simple Profile Characteristic 4 Configuration Each client has its own
 // instantiation of the Client Characteristic Configuration. Reads of the
@@ -118,6 +123,7 @@ static gattCharCfg_t *simpleProfileChar1Config;
 
 // Simple Profile Characteristic 4 User Description
 static uint8 simpleProfileChar1UserDesp[6] = "audio";
+static uint8 simpleProfileChar2UserDesp[9] = "duration";
 
 /*********************************************************************
  * Profile Attributes - Table
@@ -149,7 +155,23 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] = {
     // 4 Characteristic 1 User Description
     { { ATT_BT_UUID_SIZE, charUserDescUUID },
     GATT_PERMIT_READ,
-      0, simpleProfileChar1UserDesp }, };
+      0, simpleProfileChar1UserDesp },
+
+      // 5 Characteristic 2 Declaration
+      { { ATT_BT_UUID_SIZE, characterUUID },
+      GATT_PERMIT_READ,
+        0, &simpleProfileChar2Props },
+
+      // 6 Characteristic 2 Value
+      { { ATT_UUID_SIZE, simpleProfileChar2UUID },
+      GATT_PERMIT_READ | GATT_PERMIT_WRITE,
+        0, &simpleProfileChar2 },
+
+      // 7 Characteristic 2 User Description
+      { { ATT_BT_UUID_SIZE, charUserDescUUID },
+      GATT_PERMIT_READ,
+        0, simpleProfileChar2UserDesp },
+};
 
 gattAttribute_t *simpleProfileChar1ValueAttrHandle = &simpleProfileAttrTbl[2];
 gattAttribute_t *simpleProfileChar1ConfigAttrHandle = &simpleProfileAttrTbl[3];
@@ -317,6 +339,11 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
     uint16 uuid = BUILD_UINT16(pAttr->type.uuid[12], pAttr->type.uuid[13]);
     switch (uuid)
     {
+    case SIMPLEPROFILE_CHAR2_UUID:
+      *pValue = simpleProfileChar2;
+      *pLen = 1;
+      break;
+
     default:
       // Should never get here! (characteristics 3 and 4 do not have read permissions)
       *pLen = 0;
@@ -452,6 +479,43 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
             {
               status = ATT_ERR_INSUFFICIENT_RESOURCES;
             }
+          }
+          else
+          {
+            status = ATT_ERR_INVALID_VALUE;
+          }
+        }
+        else
+        {
+          status = ATT_ERR_INVALID_VALUE_SIZE;
+        }
+      }
+      else
+      {
+        status = ATT_ERR_ATTR_NOT_LONG;
+      }
+      break;
+
+    case SIMPLEPROFILE_CHAR2_UUID:
+      // Make sure it's not a blob operation
+      if (offset == 0)
+      {
+        if (len == 1)
+        {
+          if (*pValue == 5)
+          {
+            Audio_updateDuration(5);
+            simpleProfileChar2 = 5;
+          }
+          else if (*pValue == 10)
+          {
+            Audio_updateDuration(10);
+            simpleProfileChar2 = 10;
+          }
+          else if (*pValue == 15)
+          {
+            Audio_updateDuration(15);
+            simpleProfileChar2 = 15;
           }
           else
           {

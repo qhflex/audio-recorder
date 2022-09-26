@@ -223,7 +223,7 @@ static uint8 advHandleLegacy;
 // Address mode
 static GAP_Addr_Modes_t addrMode = DEFAULT_ADDRESS_MODE;
 
-static bool subscriptionOn;
+bool subscriptionOn = false;
 static List_List pendingOutgoingMsgs;
 
 static Clock_Struct notiClock;
@@ -423,7 +423,7 @@ static void SimplePeripheral_init(void)
  */
 static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 {
-  Semaphore_pend(bootSem, BIOS_WAIT_FOREVER);
+  Semaphore_pend(launchBleSem, BIOS_WAIT_FOREVER);
 
   // Initialize application
   SimplePeripheral_init();

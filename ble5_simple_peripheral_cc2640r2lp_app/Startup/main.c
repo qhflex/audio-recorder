@@ -56,6 +56,8 @@
 #include <ti/drivers/power/PowerCC26XX.h>
 #include <ti/drivers/GPIO.h>
 
+#include <ti/display/Display.h>
+
 #include <ti/devices/DeviceFamily.h>
 #include DeviceFamily_constructPath(inc/hw_prcm.h)
 #include DeviceFamily_constructPath(driverlib/sys_ctrl.h)
@@ -103,6 +105,7 @@ extern Display_Handle dispHandle;
  * GLOBAL VARIABLES
  */
 bool isWakingFromShutdown;
+Display_Handle dispHandle;
 
 /*******************************************************************************
  * EXTERNS
@@ -174,7 +177,15 @@ int main()
   /* Start tasks of external images - Priority 5 */
   ICall_createRemoteTasks();
 
-  bootSem = Semaphore_create(0, NULL, Error_IGNORE);
+  launchAudioSem = Semaphore_create(0, NULL, Error_IGNORE);
+  launchBleSem = Semaphore_create(0, NULL, Error_IGNORE);
+
+#ifndef Display_DISABLE_ALL
+  Display_init();
+  Display_Params dispParams;
+  Display_Params_init(&dispParams);
+  dispHandle = Display_open(Display_Type_ANY, &dispParams);
+#endif
 
   Audio_createTask();
 
