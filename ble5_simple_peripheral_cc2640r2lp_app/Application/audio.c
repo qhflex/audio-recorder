@@ -94,7 +94,9 @@
  */
 
 // hexdump -n 4 -e '"%08X\n"' /dev/urandom
-#define MAGIC                             (0x5A344176)
+// #define MAGIC                             (0x5A344176)
+// #define MAGIC                             (0xD2E86791)
+#define MAGIC                             (0x58D5BD30)
 
 #define PREAMBLE                          ((uint64_t)0x7FFF80017FFF8001)
 

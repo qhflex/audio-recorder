@@ -8,6 +8,7 @@ author: matianfu (at) gingerologist.com
 | ---------- | ------------------------------------------------------------ |
 | 2022-08-07 | 初稿，草稿；                                                 |
 | 2022-08-08 | 修改了`Status`数据结构，增加`readEnd`属性，数据包大小增加4字节，达到112字节；`START_READ`命令的说明中增加了部分内容； |
+| 2022-09-27 | 增加`9502` characteristic说明；                              |
 
 </br>
 
@@ -104,9 +105,15 @@ Flash的实际容量为128Mbits（16M Bytes），但应用开发者该容量无�
 Service和Characteristic使用的UUID模板是：`7c95XXXX-6d0c-436f-81c8-3fd7e3db0610`，其中`XXXX`是短ID代入的值，完整定义如下：
 
 - 仅定义一个服务，短ID是`9500`，全长UUID是`7c959500-6d0c-436f-81c8-3fd7e3db0610`；
+- 该服务包含两个Characteristic：
+  - 16bit ID: `9501`, (128bit ID: `7c959501-6d0c-436f-81c8-3fd7e3db0610`)；
+    - 提供`write`和`notification`能力，其中`write`当且仅当打开`notification`时有效，否则客户端写入的值都被忽略。
 
-- 该服务仅包含一个Characteristic，短ID是`9501`，全长UUID是`7c959501-6d0c-436f-81c8-3fd7e3db0610`；
-  - 提供`write`和`notification`能力，其中`write`当且仅当打开`notification`时有效，否则客户端写入的值都被忽略。
+  - 16bit ID: `9502`, (128bit ID: `7c959502-6d0c-436f-81c8-3fd7e3db0610`)；
+    - 该值为自动录音时间长度，单位分钟，缺省值5分钟；
+    - 可读，可写；
+    - 格式为1字节无符号整数，合法值为5（0x05），10（0x0a），15（0x0f）；写入其它值返回错误；
+
 
 <br/>
 
